@@ -19,7 +19,7 @@ axis. From the temperature T and the absorption coefficient κ, the models predi
 radiative intensity:
 
 ```math
-\mathcal{G} : (T, \kappa) \longmapsto I(x, y, \varphi).
+\mathcal{G} : (T, \kappa) \longmapsto I.
 ```
 
 The reference data are FVDOM solutions of a 2D pool fire (FireFOAM `smallPoolFire2D`):
