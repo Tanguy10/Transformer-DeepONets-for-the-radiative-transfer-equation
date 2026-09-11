@@ -66,7 +66,7 @@ src/
 ├── power_spectrum/          power spectral density of G and I
 ├── robustness_resolution/   training and evaluation on mixed 150² / 75² / 25² inputs
 └── dot_decoder/             Perceiver encoder + branch·trunk junction
-data/mesh_stub.h5            solver mesh, used when the raw H5 file is not available
+data/mesh_stub.h5            placeholder mesh (zeros), used when the raw H5 is absent
 ```
 
 Checkpoints, logs and results are written to `src/checkpoints/`, `src/logs/` and

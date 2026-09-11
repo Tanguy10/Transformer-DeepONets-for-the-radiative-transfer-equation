@@ -42,14 +42,10 @@ FN = {"pca": model_errors.pca_deeponet, "autoencoder": model_errors.ae_deeponet,
       "tbd": model_errors.tbd_operator}
 SETS = {"train": "TRAIN", "test": "TEST"}
 
-# One filled marker per family, all of the same visual weight, white-rimmed so that two
-# models sharing a width p stay readable where they overlap.
 FAMILY = {"pca": ("#2f6fb2", "o", 8.0, "PCA-DeepONet"),
           "autoencoder": ("#d0761c", "s", 7.2, "AE-DeepONet"),
           "tbd": ("#2e8b57", "^", 9.0, "Transformer-Based DeepONet")}
 KINDS = ("pca", "autoencoder", "tbd")
-# All the figure's type goes through this scale, and so do the offsets the labels are
-# placed at, so that growing the text does not change how tight the layout reads.
 FS = 1.3
 INK, INK2 = "#111111", "#5b5a57"
 BAND = "#f1efe9"
@@ -57,8 +53,7 @@ BAND = "#f1efe9"
 
 @contextlib.contextmanager
 def quiet(enabled=True):
-    """Swallow everything the dependencies print (checkpoint loading by
-    deeponet/encoders, internal diagnostics) so only the table remains."""
+    """Silence everything the dependencies print."""
     if not enabled:
         yield
         return
@@ -68,11 +63,7 @@ def quiet(enabled=True):
 
 
 def _fresh(path, M, refresh, tag, verbose):
-    """The cached array if it exists, is not stale, and recomputation is not forced.
-
-    Stale = length != M: the arrays have one entry per snapshot of the split, so any
-    change of split is detected here -- no silent reuse of a cache computed on other
-    snapshots."""
+    """The cached array, unless missing, stale (length != M) or forced."""
     if refresh or not os.path.exists(path):
         return None
     a = np.load(path)
@@ -96,11 +87,7 @@ def get_spectrum(I_S, tag, refresh, verbose=False):
 
 
 def get_errors(splits, device, tag, refresh, models, verbose=False):
-    """||I_m - N(u_m)||^2 per snapshot, for each model of the `tag` split, with caching.
-
-    Written as `sqerr_<model>_<split>.npy`. The `metrics_<model>_<split>.npz` of the
-    earlier version, which also carried the relative errors, is still READ for its
-    sqerr: those passes cost hours on the Transformer-Based DeepONet side."""
+    """||I_m - N(u_m)||^2 per snapshot for each model of the `tag` split, cached."""
     M = model_errors.split_data(splits, tag)["I_target"].shape[0]
     out = {}
     for name, kind, _p, _lin, ckpt_dir in models:
@@ -126,47 +113,27 @@ def get_errors(splits, device, tag, refresh, models, verbose=False):
 
 
 def p_star(curve, value):
-    """p* = the first p at which the bound drops BELOW `value`.
-
-    Reading: an affine reconstructor of dimension p < p* CANNOT reach the error `value`,
-    whatever its encoder and approximator (Thm 3.4). For an affine model of dimension p,
-    p* <= p mechanically; the gap p - p* measures the width it pays for without turning
-    it into accuracy."""
+    """p* = the first p at which the bound drops below `value`."""
     pp, bb = curve
     under = bb <= value
     return int(pp[np.argmax(under)]) if under.any() else None
 
 
 def reference(rows, t):
-    """The model whose level the horizontal is drawn at: the NARROWEST nonlinear one,
-    the best of its width.
-
-    Read from the marker rightwards to the curve: an affine reconstructor needs p* to
-    reach the E_hat that this one reaches at p. Taking the narrowest rather than the
-    most accurate model is what makes that reading sharp -- a wide model beating the
-    bound says less than a narrow one doing it."""
+    """The model the horizontal is drawn at: the narrowest nonlinear one."""
     cands = [r for r in rows if not r["affine"] and r["ehat"][t] is not None]
     return min(cands, key=lambda r: (r["p"], r["ehat"][t]), default=None)
 
 
 def _label(name):
-    """The tag written next to a marker: the family name is already carried by the
-    colour and the marker shape, the width by the axis, and the output head by the model
-    set the figure is drawn on -- so only what tells two models of a family apart is kept
-    ("TBD-N2-D128" -> "N2-D128", "PCA-p256-affine" -> "p256", dropped as redundant)."""
+    """Marker tag: the part of the name that tells two models of a family apart."""
     from encoders import encoder_run
     head = encoder_run(name).split("-", 1)
     return head[1] if len(head) == 2 and head[0].upper() in ("PCA", "AE", "TBD") else name
 
 
 def _place(fig, ax, items, blockers, fontsize=8.2 * FS):
-    """Write the labels where they do not land on anything already drawn.
-
-    Each label is tried at a handful of offsets around its marker and scored on what it
-    would cover (other labels, markers) and on how far it would stick out of the frame;
-    the first free spot wins, otherwise the least bad one. Without this a change of
-    model set (--models) silently piles the tags on top of each other, and the ones on
-    the right edge run off the panel."""
+    """Place the labels where they overlap nothing already drawn."""
     cands = [(dx * FS, dy * FS) for dx, dy in
              [(9, 4), (9, -6), (-9, 4), (-9, -6), (0, 10), (0, -14), (14, 11), (-14, -15),
               (0, -32), (18, -30), (-18, -30), (0, 26), (22, 14), (-22, 14)]]
@@ -217,8 +184,7 @@ def _marker_boxes(ax, pts, pad=7.0):
 
 
 def _curve_boxes(ax, xs, ys, n=80, pad=3.0):
-    """The display boxes of the bound itself, sampled along the visible part, so a tag
-    is not written across the one line the figure is read against."""
+    """Display boxes along the visible part of the bound."""
     from matplotlib.transforms import Bbox
     if len(xs) == 0:
         return []
@@ -238,21 +204,9 @@ def _bar_box(ax, x0, x1, y, pad=3.5):
 
 
 def plot_bound_comparison(spec, curves, rows, out_png):
-    """The bound sum_(k>p) lambda_k against p, with the models at their own width p.
+    """The bound sum_{k>p} lambda_k against p, each model at its own width p.
 
-    Ordinate: E_hat^2 = (1/M) sum_m ||I_m - G(T_m, kappa_m)||^2, in the units of I and
-    with NO normalisation -- the two sides of Thm 3.4 exactly as eq. (10) states them.
-    The relative errors are the tables' business.
-
-    One panel per dataset, log-log over p <= ~1.45 * p_max: that is the window where all
-    the models live, and the log scale makes the (E_hat/bound)^2 ratio readable as a
-    vertical distance.
-
-    The shaded area under the curve is the region Thm 3.4 forbids: no AFFINE
-    reconstructor of width p can reach an E_hat below it. Markers landing inside are not
-    violations -- the attention decoder of the Transformer-Based DeepONet is nonlinear,
-    and it going under is precisely the point being demonstrated.
-    """
+    Ordinate: E_hat^2 = (1/M) sum_m ||I_m - G(T_m, kappa_m)||^2, unnormalised."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -261,22 +215,7 @@ def plot_bound_comparison(spec, curves, rows, out_png):
 
     kinds = [k for k in KINDS if any(r["kind"] == k for r in rows)]
     p_min, p_max = min(r["p"] for r in rows), max(r["p"] for r in rows)
-    # Framed on the models rather than on the whole curve: the figure is read as a
-    # vertical distance between a marker and the bound, and that distance is only
-    # legible if the widths being compared fill the panel. Markers sit at their TRUE p
-    # -- no visual lane per family -- so what separates two models of the same width is
-    # the frame, not an offset: the decades of interest are stretched by starting at
-    # p = 100 and by cutting the empty bottom of the E axis.
     x_lo, x_hi = min(100.0, 0.9 * p_min), 1.45 * p_max
-    # The bottom is CUT at E_hat = 2e4 rather than fitted to the bound: below that the
-    # panel only held the plunge of the curve towards zero, and the decade the models
-    # actually live in was squeezed into the top third. The threshold stays written as
-    # an E_hat and is squared like every other level, so the curve leaves the
-    # frame at the same p as before. The consequence is deliberate -- the bound leaves
-    # the frame at p ~ 670 (train) and p ~ 464 (test), so the widest models have no
-    # curve under them any more; their distance to the bound is read in the table. The
-    # min() keeps a future model below 2e4 inside the frame.
-    # Every level is squared before being drawn, and nothing else is done to it.
     sq = lambda v: v * v
     ehats = [sq(e) for r in rows for e in r["ehat"].values() if e]
     tops = [sq(curves[t][1][curves[t][0] >= x_lo][0]) for t in SETS]
@@ -285,8 +224,6 @@ def plot_bound_comparison(spec, curves, rows, out_png):
 
     fig, axes = plt.subplots(1, len(SETS), figsize=(12.6, 5.0), sharey=True,
                              squeeze=False)
-    # The legend and the p* reading are drawn on the FIRST panel only: both are
-    # constructions the reader parses once and then applies to the other panel.
     first = next(iter(SETS))
     pending = []
     for ax, t in zip(axes[0], SETS):
@@ -322,23 +259,15 @@ def plot_bound_comparison(spec, curves, rows, out_png):
                 ax.plot([ps], [e], "o", ms=7.5, mfc="white", mec=col, mew=1.8, zorder=7)
                 pts.append((ps, e))
                 bar = (ref["p"], ps, e)
-                # Anchored on the open marker and handed to the SAME placer as the model
-                # tags: it then sits at the nearest free spot around p*, whatever the
-                # frame and the other labels do, instead of at a hand-picked offset.
                 items.append((ps, e, f"$p^\\star$ = {ps}", col))
 
         ax.set_xscale("log"); ax.set_yscale("log")
         ax.set_xlim(x_lo, x_hi); ax.set_ylim(y_lo, y_hi)
-        # Ticks ON the widths being compared, so a marker reads against the bound at the
-        # SAME p; the decades of a log axis say nothing here. Past a handful of distinct
-        # widths, back to the automatic ticks.
         widths = sorted({r["p"] for r in rows})
         if len(widths) <= 8:
             ax.set_xticks(widths)
             ax.set_xticklabels([str(w) for w in widths])
             ax.xaxis.set_minor_formatter(NullFormatter())
-        # Decade ticks alone leave one or two labels on an axis spanning a decade and a
-        # half: the 2 and 5 subdivisions are what makes a ratio readable off the frame.
         ax.yaxis.set_major_locator(LogLocator(base=10, subs=(1.0, 2.0, 5.0), numticks=12))
         ax.yaxis.set_major_formatter(
             LogFormatterSciNotation(labelOnlyBase=False, minor_thresholds=(np.inf, np.inf)))
@@ -346,9 +275,6 @@ def plot_bound_comparison(spec, curves, rows, out_png):
         ax.set_title(f"{SETS[t]}   (M = {spec[t]['M']})", fontsize=11.5 * FS, color=INK,
                      pad=10, fontweight="medium")
         ax.set_xlabel("$p$  --  dimension of the reconstructor", fontsize=10 * FS, color=INK2)
-        # No line crosses the panel: the decades and their 2/5 subdivisions are marked
-        # by TICKS on the spine, which is what a level is read against, and the markers
-        # then sit on plain white instead of being cut by a grid.
         ax.grid(False)
         ax.set_axisbelow(True)
         for s in ("top", "right"):
@@ -378,8 +304,7 @@ def plot_bound_comparison(spec, curves, rows, out_png):
     ax0.yaxis.set_label_coords(-0.085, 1.015)
 
     fig.tight_layout()
-    # After tight_layout only: markers, notes and labels are compared in DISPLAY
-    # coordinates, which tight_layout shifts when it resizes the axes.
+    # After tight_layout: label placement works in display coordinates, which it shifts.
     fig.canvas.draw()
     rend = fig.canvas.get_renderer()
     for ax, items, pts, bar, leg, curve in pending:

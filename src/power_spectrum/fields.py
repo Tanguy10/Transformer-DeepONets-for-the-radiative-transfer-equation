@@ -1,9 +1,3 @@
-"""Supplies I as (B, n_dirs, 150, 150) images, from the solver or from a model.
-
-Shaping only. Entry points: grid_geometry, angles_deg, load_source, predict_I,
-truth_I, to_images, to_G.
-"""
-
 from __future__ import annotations
 
 import os
@@ -18,12 +12,8 @@ if _SRC not in sys.path:
 
 GRID = 150
 
-# Every source must be a model trained against the (x, y, phi) dataset: a 4-column
-# checkpoint from the historical code base cannot be queried with it.
 SOURCES = {
     "truth": {"label": "truth (FVDOM)", "kind": "truth"},
-    # PCA and AE at the same p and the same 500-component branch input, so the
-    # only difference left between the two panels is the encoder.
     "pca": {"label": "PCA-DeepONet", "kind": "deeponet",
             "cfg": {"name": "PCA-p512-softplus", "encoder": "pca", "arch": "modular"}},
     "ae": {"label": "AE-DeepONet", "kind": "deeponet",
@@ -33,7 +23,6 @@ SOURCES = {
 }
 MODEL_KEYS = ("pca", "ae", "tbd")
 
-# Families of train.py, as they may prefix a run name on the command line.
 FAMILY = {"pca": "pca", "ae": "autoencoder", "tbd": "tbd"}
 
 
@@ -58,11 +47,8 @@ def detect_family(run):
 
 
 def resolve_source(spec):
-    """SOURCES key of a --sources entry, registering the run when it is a new one.
-
-    A key of the table above is returned as is; anything else is a run name given
-    to train.py, optionally prefixed by its family ('tbd:my-run', needed only when
-    one name carries several), and becomes a source named after the run."""
+    """SOURCES key of a --sources entry; an unknown entry is a run name
+    (optionally 'family:name'), registered as a new source."""
     import utils
     from deeponet_joint import operator_path
 
@@ -88,8 +74,7 @@ def resolve_source(spec):
                                 "arch": "modular"}}
     return run
 
-# Memory per forward scales as batch * chunk, not chunk alone; 300k fits in
-# ~1.5 GB so the analysis still runs while a training occupies the GPU.
+# Memory scales with batch * chunk: 300k points fit in ~1.5 GB next to a training.
 PTS_PER_FWD = 300_000
 
 
@@ -125,13 +110,7 @@ def grid_geometry(y_full, grid=GRID):
 
 
 def angles_deg(y_full, n_dirs):
-    """phi as stored, in degrees, and the permutation that sorts them: the dataset
-    order is not monotonic in phi, and unsorted panels hide the rotation.
-
-    phi is read straight from column 2 (convention utils.dirs_from_phi: angle from
-    +y, clockwise). The pre-phi revision of this file labelled panels with
-    atan2(muy, mux), i.e. the angle from +x -- the two differ by phi = 90 - alpha,
-    so panel names shift accordingly."""
+    """phi in degrees as stored, and the permutation that sorts it."""
     p = np.asarray(torch.as_tensor(y_full).cpu())[:n_dirs, 2]
     phi = np.degrees(p) % 360.0
     order = np.argsort(phi)
@@ -146,11 +125,7 @@ def to_images(i_flat, geom):
 
 
 def to_G(images, geom):
-    """(B, n_dirs, grid, grid) -> (B, grid, grid): G = sum_m I_m * w.
-
-    Uniform quadrature on the ordinates with the solver's solid-angle weight
-    w = 4*pi/n_dirs (utils.dir_weight), so G is the fvDOM `G` field itself.
-    """
+    """(B, n_dirs, grid, grid) -> (B, grid, grid): G = sum_m I_m * 4pi/n_dirs."""
     return np.asarray(images).sum(axis=1) * (4.0 * np.pi / geom["n_dirs"])
 
 

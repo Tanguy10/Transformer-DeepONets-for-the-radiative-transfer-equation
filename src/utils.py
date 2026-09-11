@@ -37,28 +37,16 @@ _HEAVY_ARTISTS = (ContourSet, QuadMesh, AxesImage)
 
 
 def save_figure(path, fig=None, **kw):
-    """The single figure writer of the repository: it, and not the call site, owns
-    the output format. The extension of `path` is replaced by FIG_FORMAT (pdf by
-    default: axes, text and curves stay VECTOR, hence sharp at any zoom, which no
-    finite dpi gives), and the field maps (contourf/imshow/pcolormesh) are rasterized
-    at FIG_DPI inside that vector page -- a 50-level contourf of a 150x150 grid
-    weighs several MB in pure vector, ~5x less rasterized at 600 dpi, and the data
-    itself only has 150 points per side.
+    """Write a figure in FIG_FORMAT (PDF by default), field maps rasterised at FIG_DPI.
 
-    Both knobs are environment variables, so a PNG is one run away without touching
-    any code:  RTE2D_FIG_FORMAT=png RTE2D_FIG_DPI=1200 python evaluate.py ...
-    (RTE2D_FIG_RASTER=0 forces everything vector).
-
-    Returns the path actually written -- rebind the caller's variable, so what gets
-    printed is what exists on disk."""
+    Returns the path actually written."""
     fig = plt.gcf() if fig is None else fig
     out = f"{os.path.splitext(path)[0]}.{FIG_FORMAT}"
     if os.path.dirname(out):
         os.makedirs(os.path.dirname(out), exist_ok=True)
     if FIG_RASTERIZE and FIG_FORMAT != "png":
         with warnings.catch_warnings():
-            # ContourSet.draw carries no rasterization decorator, matplotlib warns
-            # that it will be ignored -- it is not, the map does end up as an image.
+            # Spurious warning: contour sets do end up rasterized.
             warnings.filterwarnings("ignore", message="Rasterization of")
             for ax in fig.get_axes():
                 for art in ax.get_children():
@@ -69,97 +57,34 @@ def save_figure(path, fig=None, **kw):
 
 
 def dirs_from_phi(phi):
-    """THE angular convention of this repository: the only angular degree of freedom
-    of the 2D RTE is phi, the angle of the PROPAGATION direction measured from +y
-    CLOCKWISE (phi = atan2(mu_x, mu_y) folded into [0, 2pi)). It is the angle of the
-    FVDOM ordinates of the H5 file, phi_m = 2*pi*m/16 (cf. `ordinate_phis`).
+    """(mu_x, mu_y) = (sin phi, cos phi): phi is the propagation angle from +y, clockwise.
 
-    Query points are ALWAYS stored as (x, y, phi) -- 3 columns: that is what the
-    dataset holds, what `build_collocation` produces, and what the trunk (or the
-    coordinate decoder) receives. Unlike the (mu_x, mu_y) unit-circle embedding, phi
-    does NOT make I structurally 2pi-periodic: the network has to learn the
-    periodicity, and it cannot learn it at the phi = 0 = 2pi cut, which no data
-    straddles (it separates m=15 from m=0, which are NEIGHBOURS on the circle).
-
-    This function is the ONLY place that rebuilds the direction vector
-    (mu_x, mu_y) = (sin phi, cos phi) that mu.grad(I) needs: the physics wants the
-    vector, the parameterisation stays phi. Never hand-write a direction sine/cosine."""
+    The only place that rebuilds the direction vector; never hand-write it."""
     p = np.asarray(phi, dtype=np.float64)
     return np.stack([np.sin(p), np.cos(p)], axis=-1)
 
 
 def transport_coeffs(phi):
-    """(sin phi, cos phi) in torch, for mu.grad(I) = sin phi dI/dx + cos phi dI/dy.
-    The torch counterpart of `dirs_from_phi`: differentiable, same conventions."""
+    """(sin phi, cos phi) in torch, differentiable; the counterpart of `dirs_from_phi`."""
     return torch.sin(phi), torch.cos(phi)
 
 
 def ordinate_phis(n_dirs=N_DIRS_DATA):
-    """phi of the FVDOM ordinates of the H5, in the order of the m index of
-    I[:, :, m]: m turns CLOCKWISE from +y, so phi_m = 2*pi*m/n_dirs.
-
-    n_dirs=16 gives back the 16 training directions; any n_dirs that is a multiple of
-    4 contains all of them."""
+    """phi of the FVDOM ordinates, phi_m = 2 pi m / n_dirs, in the order of I[:, :, m]."""
     return 2 * math.pi * np.arange(n_dirs) / n_dirs
 
 
 def dir_weight(n_dirs=N_DIRS_DATA):
-    """Quadrature weight of one ordinate for the incident radiation G.
-
-    fvDOM's G is the SOLID-ANGLE integral G = int_{4pi} I dOmega, which the solver
-    evaluates as sum_m I_m * 4*pi/n_dirs. Checked against the `G` field of the solver
-    H5 over 80 snapshots: the identity holds to 0.87 eps(float32), i.e. exactly.
-
-    In the equatorial plane I does not depend on theta, so this is twice the azimuthal
-    integral int_0^{2pi} I dphi. Relative errors on G are insensitive to the factor,
-    absolute ones are not."""
+    """Quadrature weight 4pi/n_dirs of one ordinate, as fvDOM uses for G."""
     return 4.0 * math.pi / n_dirs
 
 
 def load_and_split_dataset(dataset_path=DEFAULT_DATASET,
                            train_frac=0.70, val_frac=0.15, seed=42, map_location="cpu"):
-    """
-    Load the whole dataset (dict_pde / dict_bc / dict_data) and split it into
-    train/val/test with one GLOBAL, reproducible shuffle (the same indices for the
-    three dictionaries).
+    """Load the dataset and split it 70 / 15 / 15 with one fixed-seed permutation.
 
-    Default split: 70 % train / 15 % val / 15 % test (test = the remainder). The three
-    blocks are CONSECUTIVE slices of the same `randperm(n, seed=42)` permutation as
-    the historical 85/15 split, in the order train -> val -> test. Intended
-    consequence:
-
-        train_85 = train_70 + val_15        and        test_15 = val_85
-
-    in other words the test block is exactly the old validation set, so checkpoints
-    trained under the 85/15 split never saw it and stay honestly evaluable on it
-    without retraining.
-
-    Returns a dict:
-        {
-          "pde":  (dict_pde_train,  dict_pde_val),
-          "bc":   (dict_bc_train,   dict_bc_val),
-          "data": (dict_data_train, dict_data_val),
-          "pde_test" / "bc_test" / "data_test": the dicts of the test block,
-          "y_full": y_data,            # shared grid coordinates
-          "train_idx" / "val_idx" / "test_idx": indices into the source dataset,
-        }
-
-    The test block is exposed separately (rather than as a 3rd tuple element) so that
-    existing callers writing `data_train, data_val = splits["data"]` keep working
-    unchanged.
-
-    The "y" key (the shared grid) is never indexed by snapshot indices.
-
-    Peak memory is kept in check (several trainings may share the machine):
-      - mmap=True: the tensors of the .pt are mapped from disk instead of being copied
-        into anonymous RAM; only the pages actually read go through the page cache,
-        which the kernel can evict. The original dataset no longer counts towards the
-        peak.
-      - incremental split: each source tensor is dropped from the source dict as soon
-        as its train/val/test copies exist, instead of coexisting with ALL the copies
-        until the end (~2x the dataset size otherwise). The three copies partition the
-        source tensor, so their combined cost stays that of the dataset.
-    """
+    Returns {"pde" | "bc" | "data": (train, val), "pde_test" | "bc_test" | "data_test",
+    "y_full", "train_idx" | "val_idx" | "test_idx"}."""
     try:
         dataset = torch.load(dataset_path, map_location=map_location, mmap=True, weights_only=False)
     except (TypeError, RuntimeError):
@@ -212,15 +137,11 @@ def load_and_split_dataset(dataset_path=DEFAULT_DATASET,
 
 
 SOLVER_H5 = os.environ.get("RTE2D_SOLVER_H5", "")
-# Mountpoint SERVING that path when the H5 lives on a remote filesystem. Both are
-# site-specific, hence empty by default: unset, the repository runs on `mesh_stub.h5`
-# and never touches the raw solver output. See `solver_h5`.
 SOLVER_H5_MOUNT = os.environ.get("RTE2D_SOLVER_H5_MOUNT", "")
 
 
 def _mounted(mountpoint):
-    """True if `mountpoint` appears in /proc/mounts. This reads a procfs file, so it
-    touches no remote filesystem and cannot block."""
+    """True if `mountpoint` is in /proc/mounts (never touches the remote filesystem)."""
     try:
         with open("/proc/mounts") as f:
             return any(ln.split()[1] == mountpoint for ln in f if len(ln.split()) > 1)
@@ -229,25 +150,11 @@ def _mounted(mountpoint):
 
 
 def solver_h5(path=SOLVER_H5, mount=SOLVER_H5_MOUNT, fallback=MESH_STUB, probe=None):
-    """The solver H5 if probing is allowed AND it answers, otherwise `mesh_stub.h5`.
-    By default **it is not probed**.
+    """The solver H5 if probing is allowed and it answers, otherwise `mesh_stub.h5`.
 
-    WARNING never replace this guard with `os.path.exists(path)`. That H5 typically
-    lives on a remote filesystem served through an indirect autofs. When the host does
-    not answer -- which can last for months -- the SLIGHTEST syscall on it
-    (`exists`, `stat`, even `lstat` on the link: it is the PARENT directory that is
-    mounted) goes into UNINTERRUPTIBLE disk sleep (state D, wchan autofs_wait). The
-    process then stops answering SIGKILL and only comes back when autofs feels like it.
-
-    Checking /proc/mounts is NOT enough: an NFS mount that is *present* but whose
-    server is dead blocks in exactly the same way. Hence the inverted default -- we
-    assume the H5 is absent, and only probe it on explicit request:
-
-        RTE2D_PROBE_SOLVER_H5=1    (environment variable)   or   solver_h5(probe=True)
-
-    This has no effect on the numbers: errors are computed on `y_coords`. The H5 is
-    only used to plot on the solver grid, and `Evaluator.ensure_grid` rebuilds that
-    grid from `y_full` when we are on the stub."""
+    Never replace this guard by `os.path.exists(path)`: on a dead autofs or NFS mount
+    any syscall hangs the process in state D, beyond SIGKILL. Probing needs
+    RTE2D_PROBE_SOLVER_H5=1."""
     if probe is None:
         probe = os.environ.get("RTE2D_PROBE_SOLVER_H5") == "1"
     if not probe or not path or not _mounted(mount):
@@ -256,20 +163,7 @@ def solver_h5(path=SOLVER_H5, mount=SOLVER_H5_MOUNT, fallback=MESH_STUB, probe=N
 
 
 def solver_G(indices, h5_path=None):
-    """The `G` field WRITTEN BY THE SOLVER, for the given snapshot indices: (n, n_cells).
-
-    Snapshot i of the .pt is the i-th `time_*` group in ALPHABETICAL order -- the order
-    `prepare_data` stacks them in -- so `indices` are indices into the .pt.
-
-    G is the solid-angle integral of the SAME 16 intensities: checked over the 901
-    snapshots of the test split, `G == dir_weight(16) * sum_m I_m` to 0.88 eps(float32).
-    Reading it therefore changes no number; it only makes the reference literal.
-
-    Read from the LOCAL copy `data/G_solver.pt` when it is there (`import_G`-style dump:
-    {"G": (n_total, n_cells), "groups": the sorted `time_*` names}); that copy is a bitwise
-    identical extract of the H5, so nothing changes and the remote store stays out of the loop.
-    Falls back to the H5 itself, which needs RTE2D_SOLVER_H5 -- it sits behind an autofs
-    mount that can hang the process beyond SIGKILL (see `solver_h5`)."""
+    """Solver-written `G` for the given .pt snapshot indices, (n, n_cells)."""
     idx = np.asarray(indices).ravel()
     if h5_path is None and os.path.exists(SOLVER_G_PT):
         return torch.load(SOLVER_G_PT, weights_only=False)["G"][idx].float()
@@ -285,15 +179,7 @@ def solver_G(indices, h5_path=None):
 
 
 def split_data(splits, which="test"):
-    """The snapshot dict of one split of `load_and_split_dataset`.
-
-    DEFAULT = **test**, and that is the rule of this repository: every REPORTED error
-    (I-L2, G-L2, maps, residual) is measured on snapshots that neither training nor
-    model selection ever saw. The val split stays reserved for monitoring during
-    training and for picking the best checkpoint -- quoting it as performance would
-    amount to publishing the selection criterion. The one deliberate exception is
-    `lower_bound/`, which compares E_hat (a NON-relative error) with the Thm 3.4 bound
-    on train AND test, each with its own spectrum."""
+    """Snapshot dict of one split of `load_and_split_dataset` (test by default)."""
     try:
         return {"train": splits["data"][0],
                 "val": splits["data"][1],
@@ -307,13 +193,7 @@ ABS_ERR_CMAP = os.environ.get("RTE2D_ABS_ERR_CMAP", "turbo")
 
 
 def sym_error_levels(arrays, n_levels=21, vmax=None):
-    """Contour levels SYMMETRIC around 0, shared by several signed error maps (so
-    white lands exactly on 0 and the panels are comparable).
-
-    Returns (levels, vmax) with vmax = max |error| over all `arrays`, unless `vmax`
-    (or RTE2D_ERR_VMAX, in %) forces it: one scale imposed on every run makes the
-    error maps of several models comparable by eye instead of each rescaling itself.
-    """
+    """Contour levels symmetric around 0 shared by signed error maps -> (levels, vmax)."""
     arrays = [np.asarray(a) for a in arrays if a is not None]
     measured = max((float(np.max(np.abs(a))) for a in arrays), default=0.0) or 1e-12
     vmax = float(vmax or ERR_VMAX or measured)
@@ -321,10 +201,7 @@ def sym_error_levels(arrays, n_levels=21, vmax=None):
 
 
 def map_colorbar(fig, im, ax, label=None, size="4%", pad=0.10, **kw):
-    """Colour bar in an axes of ITS OWN, appended to `ax`: it takes exactly the height
-    of the map and steals the same width from every panel it is applied to, so the maps
-    of a figure all keep the same size whatever their bar carries.
-    """
+    """Colour bar in its own axes appended to `ax`, so every map keeps the same size."""
     cax = make_axes_locatable(ax).append_axes("right", size=size, pad=pad)
     cb = fig.colorbar(im, cax=cax, **kw)
     if label is not None:
@@ -333,21 +210,7 @@ def map_colorbar(fig, im, ax, label=None, size="4%", pad=0.10, **kw):
 
 
 def g_simple_figure(G_ref, G_pred, err, X_grid, Y_grid, g_vmax=None):
-    """Reference | prediction | |dG| / ||G||_inf, the palette of the multi-resolution
-    figures (`robustness_resolution`): inferno for G, ABS_ERR_CMAP for the error, imshow
-    rather than filled contours.
-
-    NOTHING here is scaled on the panel it draws, otherwise two figures could not be
-    compared by eye: an error of 20 % must carry the same colour everywhere.
-
-      * the error panel runs on a FIXED 0..ERR_VMAX_DEFAULT % (RTE2D_ERR_VMAX
-        overrides), whatever the model -- a pointed colour bar flags the models that
-        run past it instead of silently rescaling the map;
-      * both G panels share `g_vmax`, passed by `plot_eval_snapshots` as the peak over
-        ALL the snapshots of the figure set, so one G level = one colour across the
-        whole set (it falls back to the peak of the reference, which is at least
-        identical from one model to the next on a given snapshot).
-    """
+    """Reference | prediction | |dG|/||G||_inf, on fixed scales shared across figures."""
     vG = float(g_vmax or np.max(G_ref))
     vE = float(ERR_VMAX or ERR_VMAX_DEFAULT)
     kw = dict(origin="lower", interpolation="nearest",
@@ -375,22 +238,9 @@ def _err_title(e, label):
 
 
 def rel_error_map(pred, ref, mode="peak", floor_frac=0.02, signed=True):
-    """RELATIVE error map, in PERCENT, between a predicted field and its reference.
+    """Relative error map in percent: 'peak' divides by max(ref), 'local' pointwise.
 
-    mode:
-      * "peak"  (default) -- 100*|pred - ref| / max(ref). A GLOBAL normalisation by the
-        peak of the reference field: robust (no division by ~0 in the cold regions,
-        where G tends to 0 and a local relative error would blow up without saying
-        anything useful), and identical for every model on a given snapshot, hence
-        directly comparable.
-      * "local" -- 100*|pred - ref| / max(|ref|, floor_frac*max|ref|): the POINTWISE
-        relative error, the literal definition, but floored at `floor_frac` of the peak
-        so that near-zero cells do not saturate the map.
-
-    signed=True (default) returns the SIGNED error (pred - ref, in %), to be drawn with
-    `ERR_CMAP` + `sym_error_levels`: blue = the model under-estimates, red = it
-    over-estimates. signed=False returns |pred - ref|.
-    """
+    Signed (pred - ref) by default."""
     pred = np.asarray(pred, dtype=np.float64)
     ref = np.asarray(ref, dtype=np.float64)
     peak = float(np.max(np.abs(ref))) or 1.0
@@ -400,26 +250,7 @@ def rel_error_map(pred, ref, mode="peak", floor_frac=0.02, signed=True):
 
 
 def snapshot_variance(dict_data, field="G", n_dirs=None, metric="var"):
-    """SPATIAL variance of each snapshot of a split dict (a measure of "chaos").
-
-    field: "G" (incident radiation, the integral of I over phi -- the default, and the
-    field actually plotted), "I" (raw directional intensities), "T" (u1_in) or "kappa"
-    (u2_in).
-    metric: "var" (plain variance, what a "largest variance" ranking asks for), "cv"
-    (coefficient of variation std/mean) or "structure" (cf. below).
-
-    "var" and "cv" both rank by INTENSITY: they put the compact, very bright plumes
-    first, and those all look alike. "structure" divides the field by its own peak
-    BEFORE measuring it, so the amplitude drops out and only the geometry is left:
-
-        score = mean|grad(G / max G)| * sqrt(fraction of cells above 0.15 max G)
-
-    i.e. FINE (sharp gradients) and SPREAD OUT (a long meandering plume, detached
-    vortices) rather than merely intense. Empirically it selects the snapshots that
-    read best on a figure, and they sit at the BOTTOM of the variance ranking.
-
-    Returns an np.ndarray of shape (n_snapshots,).
-    """
+    """Per-snapshot spatial score of `field` ('var', 'cv' or 'structure'), (n_snapshots,)."""
     key = {"T": "u1_in", "kappa": "u2_in", "I": "I_target", "G": "I_target"}[field]
     X = dict_data[key].float()
     if field == "G":
@@ -442,15 +273,7 @@ def snapshot_variance(dict_data, field="G", n_dirs=None, metric="var"):
 
 def most_chaotic_snapshots(dict_data, k=4, field="G", metric="var", n_dirs=None,
                            verbose=True):
-    """Indices of the `k` MOST CHAOTIC snapshots of a split = largest spatial variance
-    of the `field` (cf. `snapshot_variance`), sorted from most to least chaotic.
-
-    This is the default selection for the comparison figures: a snapshot drawn at
-    random is often flat and uninformative, whereas a high-variance field carries the
-    structures (plume, fronts) where the models really differ.
-
-    Returns (indices np.ndarray (k,), variances np.ndarray (n_snapshots,)).
-    """
+    """Indices of the `k` snapshots of largest spatial variance -> (indices, variances)."""
     v = snapshot_variance(dict_data, field=field, n_dirs=n_dirs, metric=metric)
     idx = np.argsort(v)[::-1][:k]
     if verbose:
@@ -465,14 +288,9 @@ def most_chaotic_snapshots(dict_data, k=4, field="G", metric="var", n_dirs=None,
 
 
 class Evaluator:
-    """
-    Evaluation and visualisation of the model predictions.
+    """Evaluation and figures of model predictions.
 
-    The encoder (PCA, autoencoder or Transformer-Based DeepONet) is attached through
-    the `self.encoder` attribute after construction:
-        evaluator = Evaluator(model, device)
-        evaluator.encoder = encoder
-    """
+    The encoder is attached after construction: `evaluator.encoder = encoder`."""
 
     def __init__(self, model, device,
                  h5_path=None):
@@ -494,14 +312,7 @@ class Evaluator:
             self.Y_grid = self.y_flat.reshape(150, 150)
 
     def ensure_grid(self, y_full, grid=150):
-        """Rebuild the plotting grid from `y_full` when the loaded mesh is DEGENERATE.
-
-        When the solver H5 is unreachable we fall back on mesh_stub.h5, whose
-        `mesh/cell_centers` contains ONLY zeros; a contourf on that grid gives an empty
-        figure. The real spatial coordinates live in y_full (= dict_data['y'] of the
-        .pt), in cell-major order: y_full[::n_dirs, :2]. Returns True if the grid was
-        replaced.
-        """
+        """Rebuild the plotting grid from `y_full` on the stub mesh; True if replaced."""
         if np.ptp(self.x_flat) > 0 or np.ptp(self.y_flat) > 0:
             return False
         n_dirs = self._infer_direction_count(y_full)
@@ -514,8 +325,7 @@ class Evaluator:
         return True
 
     def _encode_inputs(self, u1_raw, u2_raw):
-        """Apply the encoder (PCA/AE) to raw fields and return the
-        latent tensors ready for the branch nets, on the right device."""
+        """Encode raw fields into the branch-net latents, on the right device."""
         if self.encoder is None:
             raise RuntimeError("No encoder attached: set `evaluator.encoder = encoder`.")
         temp = {"u1_in": u1_raw, "u2_in": u2_raw}
@@ -552,13 +362,7 @@ class Evaluator:
         return torch.sum(I_reshaped, dim=2) * dir_weight(n_dirs)
 
     def _predict_chunked(self, u_in, y_coords, chunk=20000):
-        """Model forward over a grid of points, IN CHUNKS (bounded memory).
-
-        Evaluates the trunk on blocks of `chunk` points instead of the whole grid at
-        once: the peak memory no longer depends on the total number of points (which
-        matters for 150*150*16 = 360000, where one trunk activation is 704 MB/layer).
-        Returns (B, P), under no_grad. The order of the points is preserved.
-        """
+        """Model output (B, P) over the grid, `chunk` points at a time, under no_grad."""
         y_coords = y_coords.to(self.device)
         preds = []
         with torch.no_grad():
@@ -569,13 +373,7 @@ class Evaluator:
 
     @staticmethod
     def _per_snapshot_norms(pred, true, eps=1e-8):
-        """PER-SNAPSHOT relative L2 and L1 errors (norm over dim=1).
-
-        The convention of Lu et al. 2026 (Table 1): one error per snapshot, and the
-        statistics (mean/std/min/max) are taken over the snapshots. Unlike a global
-        norm over the flattened batch, every snapshot weighs the same, bright or dark.
-        Retourne deux tenseurs (B,).
-        """
+        """Per-snapshot relative L2 and L1 errors, two (B,) tensors."""
         diff = pred - true
         l2 = diff.norm(p=2, dim=1) / true.norm(p=2, dim=1).clamp_min(eps)
         l1 = diff.norm(p=1, dim=1) / true.norm(p=1, dim=1).clamp_min(eps)
@@ -583,36 +381,15 @@ class Evaluator:
 
     @staticmethod
     def _per_snapshot_abs(pred, true):
-        """PER-SNAPSHOT errors in PHYSICAL UNITS (no normalisation).
-
-        Returns (||pred - true||_2, mean|pred - true|) per snapshot, both (B,). The
-        first one is the ||I_m - N(u_m)|| of Thm 3.4 (cf. lower_bound/), whose
-        root-mean-square over the snapshots is E_hat -- the quantity the bound applies
-        to. The second is a mean absolute error, in W/m2/sr for I and W/m2 for G.
-        """
+        """Per-snapshot ||pred - true||_2 and mean|pred - true|, both (B,)."""
         diff = (pred - true).double()
         return diff.norm(p=2, dim=1), diff.abs().mean(dim=1)
 
     def evaluate_split_errors(self, loader, y_coords=None, label="TEST", g_ref=None):
-        """PER-SNAPSHOT relative L1/L2 errors over the given DataLoader, aggregated
-        into mean/std/min/max (the metric of Table 1 of Lu et al. 2026).
+        """Per-snapshot relative L1/L2 errors over `loader`, as mean/std/min/max.
 
-        `label` is only a display label: the split is whatever the loader holds.
-        Callers that REPORT a performance pass the test split (cf. `split_data`).
-
-        The loader must yield ALREADY ENCODED inputs (u1_in, u2_in latents).
-        The I_l2/I_l1/G_l2/G_l1 keys of the returned dict are per-snapshot MEANS.
-
-        `g_ref` (n_snapshots, n_cells), when given, replaces the integrated
-        `sum_m I_target` as the REFERENCE for G -- pass `solver_G(splits[...])` to
-        compare against the solver's own G field. It must follow the loader order
-        (the loaders here are built with shuffle=False).
-
-        The same pass also returns the errors in PHYSICAL UNITS (nothing is divided by
-        the norm of the truth): `*_ehat` = RMS over the snapshots of ||pred - true||
-        (the E_hat of `lower_bound/`, comparable with the Thm 3.4 bound), `*_rmse` =
-        the same per point (E_hat / sqrt(P)), `*_mae` = mean |pred - true|.
-        """
+        The loader yields encoded inputs; `g_ref` replaces the integrated G as reference.
+        Also returns absolute errors (`*_ehat`, `*_rmse`, `*_mae`)."""
         self.model.eval()
         val_loader = loader
         l1_errors, l2_errors, g_l1_errors, g_l2_errors = [], [], [], []
@@ -692,16 +469,7 @@ class Evaluator:
 
     def plot_dataset_snapshot(self, dict_data, snapshot_idx, output_dir="results/evaluation",
                               prefix="Train", err_mode="peak"):
-        """
-        Take one snapshot out of the PyTorch dict (RAW fields), encode the inputs,
-        run the model, integrate over the directions to get G, and plot the comparison
-        against the dataset ground truth:
-
-            G truth  |  G model  |  RELATIVE error in % (cf. `rel_error_map`)
-
-        The first two panels share the G scale (set by the truth, hence identical for
-        every model on that snapshot).
-        """
+        """G truth | G model | relative error for one raw snapshot of the dataset."""
         self.model.eval()
         os.makedirs(output_dir, exist_ok=True)
 
@@ -765,19 +533,8 @@ class Evaluator:
         plt.close()
 
     def plot_snapshot_comparison(self, snapshot_idx=0, output_dir="results/evaluation", div_key="divQr"):
-        """
-        Compare four reconstructions of the incident radiation G for one snapshot:
-          - G_true        : the G field stored by the FVDOM solver (HDF5)
-          - G_true_integ  : integral of the 16 dataset intensities I (uniform quadrature)
-          - G_pred_16     : integral of the model over the 16 training directions
-          - G_pred_gauss  : integral of the model over 32 Gauss-Legendre nodes
-                            (generalisation to unseen angles)
-
-        Every reconstruction uses the same normalisation sum(w) = 4pi (the OpenFOAM
-        convention) and the repository's single angular convention (`dirs_from_phi`),
-        so they are directly comparable with G_true. G_pred_16 therefore lands exactly
-        on the 16 training labels (`ordinate_phis`).
-        """
+        """Compare G for one snapshot: solver, integral of the dataset intensities, and
+        model integrated over the 16 training and 32 Gauss-Legendre directions."""
         self.model.eval()
         os.makedirs(output_dir, exist_ok=True)
 
@@ -899,27 +656,9 @@ class Evaluator:
     def plot_snapshot_comparison_dataset(self, dict_data, snapshot_idx, y_full,
                                          output_dir="results/evaluation", include_unseen_angles=True,
                                          err_mode="peak", g_vmax=None):
-        """Variant of `plot_snapshot_comparison` that does NOT DEPEND on the raw solver
-        H5: T, kappa and I are sourced straight from `dict_data` (a split dict of the .pt).
+        """`plot_snapshot_comparison` from `dict_data` alone, without the solver H5.
 
-        IMPORTANT: unlike the H5 version, the (x,y) coordinates AND the phi angles used
-        as MODEL input come from `y_full` (the .pt), NOT from `self.x_flat/self.y_flat`
-        (mesh_stub.h5) -- the latter only holds degenerate PLACEHOLDER coordinates
-        (everything at ~[0,0], verified empirically), usable for the figure layout
-        (X_grid/Y_grid) but never as model input. The 16 trained directions are READ
-        from y_full (the source of truth); unseen angles go through `ordinate_phis`
-        (cf. `dirs_from_phi` for the single angular convention).
-
-        Difference with `plot_snapshot_comparison`: there is no independent SOLVER
-        G_true field (it only lives in the H5), so the REFERENCE becomes
-        G_ref = integral of I_data over the n_dirs stored directions (= the training
-        target itself; in practice the most relevant comparison for judging the model,
-        independently of solver/dataset fidelity).
-
-        `include_unseen_angles=False` only shows and computes G_ref and G_pred_16 (the
-        16 directions actually trained), dropping the unseen-angle generalisation panels
-        (32 uniform, Gauss-Legendre) -- which also saves their cost (32+32 fewer decoder
-        passes per snapshot)."""
+        Model inputs come from `y_full`, never from the stub mesh (all zeros)."""
         self.model.eval()
         os.makedirs(output_dir, exist_ok=True)
 
@@ -941,8 +680,7 @@ class Evaluator:
         y_t = cell_xy[:, 1].to(self.device)
 
         def reconstruct_G(phis, weights):
-            """sum_m w_m I_model(phi_m); phis = angles already built (read from y_full,
-            or produced by `ordinate_phis`)."""
+            """sum_m w_m I_model(phi_m) over the given angles."""
             G = torch.zeros(n_cells, device=self.device)
             with torch.no_grad():
                 for phi_m, w_m in zip(phis, weights):
@@ -1051,14 +789,9 @@ class Evaluator:
 
 
 def build_collocation(split_data, y_full, n_dirs, n_cells, trained_dirs, seed, device):
-    """Build the (x, y, phi) points covering the domain, plus the cell indices.
+    """(x, y, phi) points at the mesh cell centres, 16 trained or n_dirs random angles.
 
-    The spatial points ARE mesh cell centres, so the source S = kappa*(sigma/pi)*T^4
-    is EXACT there. The directions are either the 16 trained ones (--trained_dirs) or
-    n_dirs random continuous phi angles over [0, 2pi).
-
-    Returns (y (P,3), cell_idx (P,), T (N,ncells), kappa (N,ncells)).
-    """
+    Returns (y (P, 3), cell_idx (P,), T (N, ncells), kappa (N, ncells))."""
     n_dirs_data = int(torch.unique(y_full[:, 2]).shape[0])
     cell_xy = y_full[::n_dirs_data, :2]
     n_cells_total = cell_xy.shape[0]
@@ -1093,11 +826,7 @@ def build_collocation(split_data, y_full, n_dirs, n_cells, trained_dirs, seed, d
 
 def evaluate(model, encoder, y, cell_idx, T, kappa, device,
              n_snapshots=None, chunk=64, reservoir_cap=2_000_000, seed=0):
-    """Compute the residual r = mu.grad(I) + kappa*I - S over every (snapshot, point).
-
-    Derivatives come from model.pde_residual (exact autodiff). Online accumulators
-    (RMS, correlation) plus a reservoir of |r| for percentiles/histogram.
-    """
+    """Residual r = mu.grad(I) + kappa*I - S over every (snapshot, point), by autodiff."""
     from deeponet import IB_COEF, INPUT_KEYS
 
     enc = encoder.transform_dicts({"u1_in": T, "u2_in": kappa}, INPUT_KEYS)
@@ -1155,8 +884,7 @@ def evaluate(model, encoder, y, cell_idx, T, kappa, device,
 
 
 def report(acc, model_tag, i_max=None):
-    """Print the physics verdict. When i_max (= max I_target, a FIXED scale) is given,
-    also report the physics loss normalised by the intensity peak."""
+    """Print the physics verdict; `i_max` adds the loss normalised by the peak of I."""
     n = int(acc["n"])
     rms_r = math.sqrt(acc["r2"] / n)
     mean_abs = acc["abs_r"] / n
@@ -1205,9 +933,7 @@ def report(acc, model_tag, i_max=None):
 
 
 def check_autodiff(model, encoder, y, cell_idx, T, kappa, device, n_pts=2000):
-    """Compare the transport term of pde_residual (jacfwd) with a direct
-    torch.autograd.grad -> proves the derivative is exact autodiff, not a finite
-    difference."""
+    """Check the transport term of pde_residual against torch.autograd.grad."""
     from deeponet import IB_COEF, INPUT_KEYS
 
     sel = torch.randperm(y.shape[0])[:min(n_pts, y.shape[0])]
@@ -1238,8 +964,7 @@ def check_autodiff(model, encoder, y, cell_idx, T, kappa, device, n_pts=2000):
 
 def plot_residual_map(model, encoder, split_data, y_full, snapshot_idx, phi,
                       device, output_dir, grid=(150, 150)):
-    """Spatial map of the predicted I and of |PDE residual| for one snapshot and one
-    direction phi (angle from +y clockwise, cf. `dirs_from_phi`)."""
+    """Maps of predicted I and |PDE residual| for one snapshot and one direction phi."""
     from deeponet import IB_COEF, INPUT_KEYS
 
     os.makedirs(output_dir, exist_ok=True)
@@ -1303,9 +1028,7 @@ def plot_histogram(reservoir, output_dir, tag):
 
 
 def fd_residual_stats(I_t, T, kap, phis, dx, dy, mask=None):
-    """Accumulate RMS(r), RMS(S) and the transport-vs-(S-kappa*I) correlation over
-    every (snap, cell, dir), with grad(I) from finite differences (np.gradient).
-    `phis`: angles (n_dir,)."""
+    """RMS(r), RMS(S) and correlation accumulators, grad(I) by finite differences."""
     from deeponet import IB_COEF
 
     G = int(round(T.shape[1] ** 0.5))
@@ -1386,9 +1109,7 @@ def fd_accumulate(acc_tot, acc):
 @torch.no_grad()
 def model_fd_residual(model, encoder, T, kap, phis, dx, dy, y_full, i_max,
                       ncell, n_dir, device, snap_block=64):
-    """Predict the model I over y_full (ordered grid), then apply the SAME finite
-    differences as on the FVDOM data -> an apples-to-apples residual. Returns
-    (acc_tot, per_snap)."""
+    """FD residual of the model's I on the ordered grid -> (acc_tot, per_snap)."""
     from deeponet import INPUT_KEYS
 
     enc = encoder.transform_dicts({"u1_in": T, "u2_in": kap}, INPUT_KEYS)
@@ -1475,13 +1196,7 @@ def reconstruct_and_plot(encoder, dict_data, field_key, snapshot_idx, encoder_ki
 
 
 def aggregate_split_error(encoder, dict_data, field_key, encoder_kind, split="val"):
-    """Reconstruction error over the WHOLE split (not a single snapshot).
-
-    Rebuilds every snapshot of the split in one pass and reports the MEAN per-snapshot
-    relative L2 (directly comparable with the single-snapshot mode, and with the I/G
-    errors of the model, which are per-snapshot means too), its standard deviation and
-    its max over the snapshots. Every snapshot weighs the same.
-    """
+    """Mean, std and max of the per-snapshot reconstruction L2 over the whole split."""
     X = dict_data[field_key].float()
     X_rec = encoder.reconstruct_field(field_key, X).float()
     n = X.shape[0]
@@ -1500,8 +1215,7 @@ def aggregate_split_error(encoder, dict_data, field_key, encoder_kind, split="va
 
 def reconstruct_and_plot_joint(encoder, dict_data, snapshot_idx, grid_shape=(150, 150),
                                output_dir=None, raw_idx=None, split="all"):
-    """Plot orig/recon/error for BOTH fields of one snapshot (a 2x3 figure), using a
-    joint encoder (a single latent z for (T, kappa) -> two decodings)."""
+    """Original / rebuilt / error for both fields of one snapshot, joint encoder."""
     disp = snapshot_idx if raw_idx is None else raw_idx
     output_dir = output_dir or os.path.join(RESULTS_DIR, "figures")
 
@@ -1573,8 +1287,7 @@ def aggregate_split_error_joint(encoder, dict_data, split="val"):
 
 
 def encoder_reconstruct_pair(encoder, u1, u2):
-    """(T, kappa) rebuilt by any encoder: joint ones decode both from a single latent,
-    the others field by field."""
+    """(T, kappa) rebuilt by any encoder, joint or per field."""
     if hasattr(encoder, "reconstruct_fields"):
         return encoder.reconstruct_fields(u1, u2)
     return (encoder.reconstruct_field("u1_in", u1),
@@ -1582,8 +1295,7 @@ def encoder_reconstruct_pair(encoder, u1, u2):
 
 
 def encoder_split_error(encoder, dict_data, kind, split="test"):
-    """Reconstruction error of an encoder over a whole split, for BOTH fields, whatever
-    its kind -- returns [stats(T), stats(kappa)] as `aggregate_split_error` does."""
+    """Reconstruction error of any encoder over a split -> [stats(T), stats(kappa)]."""
     if hasattr(encoder, "reconstruct_fields"):
         return aggregate_split_error_joint(encoder, dict_data, split=split)
     return [aggregate_split_error(encoder, dict_data, f, kind, split=split)
@@ -1592,15 +1304,9 @@ def encoder_split_error(encoder, dict_data, kind, split="test"):
 
 def plot_encoder_comparison(entries, dict_data, snapshot_idx, grid_shape=(150, 150),
                             output_dir=None, raw_idx=None, split="all"):
-    """Compare several encoders on ONE snapshot, bare: two rows (T, kappa), the solver
-    field, then every reconstruction on the truth colour scale, then every
-    |Delta| / ||truth||_inf in % on a scale shared across encoders. No title and no
-    number on the panels -- each encoder is named by its family and its latent dimension,
-    the errors live in the metrics files.
+    """Compare encoders on one snapshot: rows T and kappa; truth, reconstructions, errors.
 
-    `entries` = [(label, encoder), ...], e.g. [("PCA, d = 500", enc_pca),
-    ("AE, d = 500", enc_ae)].
-    """
+    `entries` = [(label, encoder), ...]."""
     disp = snapshot_idx if raw_idx is None else raw_idx
     output_dir = output_dir or os.path.join(RESULTS_DIR, "figures")
 
@@ -1608,9 +1314,6 @@ def plot_encoder_comparison(entries, dict_data, snapshot_idx, grid_shape=(150, 1
     u2 = dict_data["u2_in"][snapshot_idx:snapshot_idx + 1].float()
     recs = [encoder_reconstruct_pair(enc, u1, u2) for _, enc in entries]
 
-    # Every map is given a colour-bar slot of its own, left empty when it carries no
-    # bar: all the panels keep exactly the same size, and the two bars that are drawn
-    # take the height of the maps instead of that of their grid cell.
     n = len(entries)
     fig, axs = plt.subplots(2, 2 * n + 1, figsize=(3.4 * (2 * n + 1), 6.4), squeeze=False)
     caxs = [[make_axes_locatable(axs[r, c]).append_axes("right", size="4%", pad=0.10)
@@ -1635,8 +1338,6 @@ def plot_encoder_comparison(entries, dict_data, snapshot_idx, grid_shape=(150, 1
             im_e = axs[row, n + 1 + j].imshow(err, cmap="Reds", origin="lower",
                                               vmin=0.0, vmax=emax)
 
-        # One colour bar per group: truth and reconstructions share a scale, and so do
-        # the error maps, which is what makes the encoders comparable panel to panel.
         for col, im in ((n, im_f), (2 * n, im_e)):
             cb = fig.colorbar(im, cax=caxs[row][col])
             if col == 2 * n:
@@ -1665,31 +1366,10 @@ def reconstruction_report(encoder_kind, name, dataset=DEFAULT_DATASET, split="te
                           field="both", snapshots=None, aggregate=False, grid=150,
                           output_dir=None, device="cpu", prefer_ft=False, splits=None,
                           encoder=None):
-    """Full driver for the reconstruction quality of an encoder.
+    """Reconstruction quality of the `encoder_kind` encoder of run `name` on `split`.
 
-    Loads the `encoder_kind` encoder of experiment `name`, restricts the fields to the
-    requested `split`, then:
-      - `aggregate=True`: mean relative L2 over the WHOLE split -- the only mode that
-        is comparable from one encoder to another;
-      - `snapshots` not None: one figure per snapshot, from the same dataset load. It
-        takes an int, an iterable of indices WITHIN the split, or a selection spec
-        ("chaotic:1,random:2", cf. `resolve_snapshots`).
-
-    The two are independent: `aggregate=True` with `snapshots="chaotic:1,random:2"`
-    gives the split metric AND its figures in one pass.
-
-    `prefer_ft=False` by default: we look at the encoder as trained, not at its version
-    fine-tuned with the DeepONet (unlike `eval_one`, which must pair weights consistent
-    with the model being evaluated). `encoder` overrides the whole loading step -- the
-    way to judge a Transformer-Based DeepONet encoder as fine-tuned, since those weights
-    live in the operator checkpoint and not under an `_ft` name.
-
-    Returns the list of error dicts in aggregate mode, `None` otherwise.
-
-        utils.reconstruction_report("pca", "PCA-p128")                      # metric only
-        utils.reconstruction_report("tbd", "TBD-N4-D128", aggregate=True,
-                                    snapshots="chaotic:1,random:2", split="test")
-    """
+    `aggregate`: mean relative L2 over the split; `snapshots`: figures (cf.
+    `resolve_snapshots`). Returns the error dicts in aggregate mode, else None."""
     if snapshots is None and not aggregate:
         aggregate = True
     if device == "auto":
@@ -1757,13 +1437,9 @@ def reconstruction_report(encoder_kind, name, dataset=DEFAULT_DATASET, split="te
 
 
 def load_any_encoder(cfg, device, prefer_ft=True, save_dir=CHECKPOINTS_DIR):
-    """Load the encoder of a model from cfg['encoder'] (+ cfg['name']).
+    """Encoder of cfg['name'], preferring the fine-tuned `_ft` weights when they exist.
 
-    Prefers the fine-tuned encoder (_ft) when it exists: a checkpoint produced by a
-    --finetune_encoder run evolved the AE jointly with the DeepONet, so evaluating with
-    the original (frozen) encoder would pair inconsistent weights. Matches the same
-    preference applied in run_eval_2d. `prefer_ft=False` forces the encoder as trained
-    (for reconstruction figures: we judge the encoder, not the encoder+DeepONet pair)."""
+    `prefer_ft=False` loads the encoder as pretrained."""
     name, kind = cfg["name"], cfg["encoder"]
     if kind in ("joint_ae", "tbd"):
         from deeponet_joint import joint_encoder_path
@@ -1807,15 +1483,7 @@ def load_any_model(cfg, device, save_dir=CHECKPOINTS_DIR):
 def eval_one(cfg, device, splits, with_residual=True, with_recon=False,
              batch_size_data=256, res_n_cells=4000, res_n_dirs=16, res_seed=0,
              which="test"):
-    """Evaluate a model (any architecture) on the `which` split (TEST by default, cf.
-    `split_data`) and return a dict of metrics: I-L2/L1, G-L2/L1, optionally the
-    encoder reconstruction of T/kappa, optionally the residual rho/corr and
-    RMS(r)/max(I). Keys that were not computed are None.
-
-    Example:
-        eval_one({"name":"PCA-p128-softplus","encoder":"pca","arch":"modular"},
-                 device, splits, with_residual=True)  -> I_l2 on the test split
-    """
+    """Metrics dict of one model on the `which` split (test by default)."""
     from deeponet import INPUT_KEYS
     from torch.utils.data import DataLoader, TensorDataset
 
@@ -1866,8 +1534,7 @@ def eval_one(cfg, device, splits, with_residual=True, with_recon=False,
 
 def plot_pca_modes(enc, n=5, grid=150, unscale=False, amplitude=False,
                    out="results/figures/pca_modes.pdf", enc_name=""):
-    """Plot the first n eigenmodes (POD) of a PCA encoder, one field per row.
-    --amplitude: x sqrt(var) (x scale_ with StandardScaler) -> physical field units."""
+    """First n POD modes of a PCA encoder, one field per row."""
     labels = {"u1_in": r"$u_1 = T$  (temperature, K)",
               "u2_in": r"$u_2 = \kappa$  (absorption, m$^{-1}$)"}
     keys = list(enc.pcas.keys())
@@ -1913,8 +1580,7 @@ def plot_pca_modes(enc, n=5, grid=150, unscale=False, amplitude=False,
 def plot_pod_decomposition(enc, dataset=DEFAULT_DATASET, key="u1_in",
                            snapshot=0, n=8, grid=150, cmap="RdBu_r",
                            out="results/figures/pod_decomposition.pdf"):
-    """POD decomposition of ONE snapshot: the anomaly x - x_bar plus the a_i*v_i
-    contributions of the n modes, all on a common scale (same physical units)."""
+    """POD decomposition of one snapshot on a common scale."""
     pca = enc.pcas[key]
     scaler = enc.scalers.get(key)
     V = pca.components_
@@ -1966,9 +1632,7 @@ def plot_pod_decomposition(enc, dataset=DEFAULT_DATASET, key="u1_in",
 def plot_pod_modes_scaled(enc, key="u1_in", n=11, modes=None, grid=150,
                           mode_cmap="RdBu_r", mean_cmap="magma",
                           out="results/figures/pod_modes_scaled.pdf"):
-    """POD board: mean field + modes weighted by sqrt(lambda) (typical physical
-    amplitude), on a common scale with ONE colorbar for the modes. `modes` = 1-indexed
-    indices (a list or 'a,b,c'), taking priority over n."""
+    """Mean field and POD modes weighted by sqrt(lambda), on a common scale."""
     pca = enc.pcas[key]
     scaler = enc.scalers.get(key)
     V = pca.components_
@@ -2071,8 +1735,7 @@ def plot_kappa_reconstruction(enc, dataset=DEFAULT_DATASET, key="u2_in",
                               snapshot=0, ks=(0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 500),
                               grid=150, cmap="magma",
                               out="results/figures/kappa_reconstruction.pdf", enc_name=""):
-    """Progressive POD reconstruction of a field: the mean plus the truncated sum of
-    the first k modes, for increasing k (the flame gets sharper and sharper)."""
+    """Progressive POD reconstruction of a field for increasing k."""
     pca = enc.pcas[key]
     scaler = enc.scalers.get(key)
     d = torch.load(dataset, map_location="cpu", weights_only=False)
@@ -2124,28 +1787,10 @@ SNAPSHOT_RANDOM_SEED = 0
 
 def resolve_snapshots(spec, data, k_default=4, field="G", metric="var", verbose=True,
                       seed=SNAPSHOT_RANDOM_SEED):
-    """Turn a snapshot specification into a list of indices into `data`.
+    """Snapshot spec -> list of indices into `data`.
 
-    Accepts, comma separated (or as a Python list):
-      * an integer n >= 0       -> [n]
-      * -1                      -> the MOST INTENSE snapshot (max(I_target))
-      * "structure" / "structure:8" -> the k MOST STRUCTURED snapshots (largest
-        structure score of G, cf. `snapshot_variance`): the long meandering plumes
-        and detached vortices, the ones that actually read on a figure. The CLI
-        default, and the selection used for the paper figures.
-      * "chaotic" / "chaotic:4" -> the k MOST CHAOTIC snapshots (largest spatial
-        variance of G, cf. `most_chaotic_snapshots`); k defaults to `k_default`.
-        Beware: variance ranks by INTENSITY, so it returns compact bright blobs
-        that all look alike -- prefer "structure" to pick a figure.
-      * "random" / "random:4"   -> k snapshots DRAWN AT RANDOM among those not already
-        selected -- they give an UNBIASED view of the model, where the chaotic ones
-        alone show its worst case. The draw is SEEDED (`seed`, fixed by default), so
-        every model is compared on the SAME random snapshots, evaluation after
-        evaluation.
-      * e.g. "structure:8" (the CLI default) or "structure:4,random:2,0,-1"
-
-    Duplicates are removed, keeping the order of first appearance.
-    """
+    Comma-separated: n >= 0, -1 (most intense), "structure[:k]" (most structured G),
+    "chaotic[:k]" (largest variance of G), "random[:k]" (seeded draw)."""
     if isinstance(spec, (int, np.integer)):
         spec = [spec]
     elif isinstance(spec, str):
@@ -2188,18 +1833,7 @@ def resolve_snapshots(spec, data, k_default=4, field="G", metric="var", verbose=
 def plot_eval_snapshots(evaluator, dict_data, y_full, spec=SNAPSHOT_SPEC_DEFAULT,
                         output_dir="results/evaluation", include_unseen_angles=False,
                         err_mode="peak", field="G"):
-    """G truth / G model / relative error % maps for a SELECTION of snapshots, then a
-    summary of the per-snapshot errors.
-
-    The common entry point of the three evaluation modes (deeponet eval_2d,
-    deeponet_joint eval_2d and eval_operator), so they share exactly the same snapshot
-    selection, the same figures and the same summary.
-
-    `spec`: cf. `resolve_snapshots` -- by default 4 chaotic snapshots (the model's
-    worst case) plus 4 drawn at a fixed seed (an unbiased view), i.e. 8 figures.
-
-    Returns the list of dicts returned by `plot_snapshot_comparison_dataset`.
-    """
+    """G truth / model / error maps for a selection of snapshots, then an error summary."""
     snaps = resolve_snapshots(spec, dict_data, field=field)
     if not snaps:
         print("no snapshot selected -> no figure.")
@@ -2209,8 +1843,6 @@ def plot_eval_snapshots(evaluator, dict_data, y_full, spec=SNAPSHOT_SPEC_DEFAULT
     rank = np.argsort(np.argsort(-var)) + 1
     print(f"snapshots plotted ({len(snaps)}): {snaps}")
 
-    # One G scale for the whole set: the peak of the brightest reference plotted. The
-    # figures of two snapshots (and a fortiori of two models) then share every colour.
     I_sel = dict_data["I_target"][list(snaps)].float()
     g_vmax = float((I_sel.view(len(snaps), -1, n_dirs).sum(dim=2)
                     * dir_weight(n_dirs)).max())
@@ -2239,27 +1871,7 @@ def plot_pred_compare(models=("expPCA100", "expPCA10", "expPCA3"), snapshot=-1,
                       dataset=DEFAULT_DATASET,
                       out="results/figures/pred_compare.pdf", device=None,
                       err_mode="peak", with_error_row=True, splits=None, which="test"):
-    """Compare G = integral of I over phi as predicted by several models against the
-    truth, on a common scale, with each model's RELATIVE ERROR MAP in % underneath.
-
-      row 1: G truth | G model 1 | G model 2 | ...  (scale set by the truth)
-      row 2:   --    | error %   | error %   | ...  (scale shared by all)
-
-    `snapshot`: cf. `resolve_snapshots` -- an integer, -1 (the most intense), a list, or
-    "chaotic[:k]" for the k snapshots of largest spatial variance (the most structured,
-    hence the most discriminating between models). When several snapshots are asked
-    for, one figure is written per snapshot, suffixed `_snap<idx>`.
-
-    Uses ONLY the .pt dataset plus the mesh (mesh_stub.h5 as a fallback): unlike
-    `Evaluator.plot_snapshot_comparison` it needs no time_groups from the real H5, so it
-    works for any architecture/encoder already present in the .pt.
-
-    `models`: a list of names (str, back-compat = pca/modular) OR of cfg dicts
-    {"name":.., "encoder": "pca"|"autoencoder"|"joint_ae"|"tbd"|
-    "tbd_operator", "arch": "modular"|"single", "label":..}.
-    "tbd_operator" = a full TBD->I operator (encoder+decoder in the same checkpoint
-    checkpoints/operator_tbd_<name>.pt, cf. tbdeeponet.load_operator); it ignores "arch" and
-    loads encoder and model together.
+    """G of several models against the truth, with each model's error map underneath.
 
     Returns {snapshot_idx: {label: I-L2}}."""
     if device is None:
@@ -2360,19 +1972,12 @@ def plot_pred_compare(models=("expPCA100", "expPCA10", "expPCA3"), snapshot=-1,
 
 DEFAULT_H5 = SOLVER_H5
 
-# Default of `plot_val_error_vs_time`: the three ranks of the paper's PCA-DeepONet.
 PCA_SWEEP = [{"name": f"PCA-p{p}", "encoder": "pca", "arch": "modular",
               "label": f"PCA-p{p}"} for p in (128, 256, 512)]
 
 
 def snapshot_times(splits, which="test", h5_path=DEFAULT_H5):
-    """Physical time (s) of every snapshot of the requested split, ALIGNED with the
-    row order of splits['data'][...] (hence with splits[f'{which}_idx']).
-
-    Rebuilds the EXACT order of prepare_data.py (`sorted(time_*)`) and reads the
-    .attrs['time'] attribute of the H5. Returns (times, idx), where `idx` is the
-    original snapshot index (= position in the .pt) of each row of the split.
-    """
+    """Physical time of every snapshot of a split, from the H5 -> (times, idx)."""
     with h5py.File(h5_path, "r") as f:
         # Alphabetical, matching prepare_data.py: time_10 sorts before time_9,
         # so .pt snapshot order is NOT chronological.
@@ -2396,13 +2001,7 @@ def snapshot_times(splits, which="test", h5_path=DEFAULT_H5):
 @torch.no_grad()
 def per_snapshot_val_errors(cfg, device, splits, metric="I", batch_size_data=256,
                             which="test"):
-    """PER-SNAPSHOT relative L2 error over the `which` split (TEST by default), in the
-    order of splits[f'{which}_idx'] (so it pairs directly with
-    snapshot_times(..., which)).
-
-    metric: 'I' (raw directional intensity) or 'G' (integrated over the directions).
-    Returns an np.ndarray of shape (n_snapshots of the split,).
-    """
+    """Per-snapshot relative L2 on the `which` split (test by default), in split order."""
     from deeponet import INPUT_KEYS
     from torch.utils.data import DataLoader, TensorDataset
 
@@ -2442,24 +2041,7 @@ def plot_val_error_vs_time(cfgs=None, device=None, splits=None, metric="I",
                            dataset=DEFAULT_DATASET, h5_path=DEFAULT_H5,
                            out_dir="results/figures", prefix="val_error_vs_time",
                            n_time_bins=30, trend="mean"):
-    """L2 errors ordered by real PHYSICAL TIME -- ONE FIGURE PER MODEL.
-
-    For each model of `cfgs`, writes `{out_dir}/{prefix}_{name}.pdf`: a per-snapshot
-    (time, error) scatter.
-
-    trend: an aggregate curve per time window (n_time_bins equal-width windows)
-    overlaid on the scatter, to spot a region the model learns badly:
-      * "mean" (default) -- mean per window; a flat curve means no regime is
-        systematically learned worse;
-      * "p95"            -- 95th percentile per window; it spikes if a region
-        CONCENTRATES the catastrophic snapshots (better for a localised failure);
-      * None             -- scatter only.
-
-    The time of each snapshot is read back from the H5 (cf. snapshot_times), because
-    the .pt does not store it and the .pt index is not chronological.
-
-    Returns {label: {'t': times, 'err': errs}} for reuse.
-    """
+    """Per-snapshot error against physical time, one figure per model."""
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if cfgs is None:
@@ -2526,22 +2108,10 @@ def resume_path(name, kind="train", save_dir=CHECKPOINTS_DIR):
 
 
 def rel_phys_loss(residual, I, u1_eval, u2_eval, return_parts=False):
-    """RELATIVE physics loss (= squared relative residual), the project's single
-    normalisation.
+    """Relative physics loss: mean(r^2) / max(RMS(transport)^2, RMS(rhs)^2), detached.
 
-    Denominator = max(RMS(transport)^2, RMS(rhs)^2), detached: the residual has the
-    units of a kappa*I (not of an I), so normalising by I_scale^2 gave values around
-    1e2-1e3 regardless of model quality. Here we get an O(1) number comparable with the
-    data loss, and the .detach() stops the optimiser from cheating by inflating the
-    transport term.
-
-    residual, I, u1_eval, u2_eval: (B, P). Returns a torch scalar.
-
-    return_parts=True also returns mean(r^2) -- the residual MSE in physical units,
-    normalised by the number of points ONLY -- and the denominator, so a run can log
-    the ABSOLUTE physics curve, which the ratio alone does not allow to reconstruct
-    afterwards (the denominator is re-measured on every batch).
-    """
+    residual, I, u1_eval, u2_eval: (B, P). `return_parts` also returns mean(r^2) and
+    the denominator."""
     rhs = u1_eval + u2_eval * I
     transport = residual + rhs
     denom = torch.maximum((transport ** 2).mean(),
@@ -2553,19 +2123,9 @@ def rel_phys_loss(residual, I, u1_eval, u2_eval, return_parts=False):
 
 
 class TrainingHistory:
-    """Loss history of a training run: {series -> (epochs, values)}.
+    """Loss history {series: (epochs, values)}, each series with its own epochs.
 
-    Each series carries ITS OWN epochs: the data loss is recorded every epoch, the
-    physics loss only at the monitoring cadence, the validation only at validated
-    epochs -- a single aligned array would be wrong or full of holes.
-
-    Naming convention: "<split>_<term>" with split in {train, val} and term in
-    {data, phys, bc, total}. `plot_learning_curves` groups the panels by term.
-
-    Saved as JSON next to the checkpoint (`checkpoints/<name>_history.json`): light,
-    readable without torch, and enough to REPLOT or compare runs after the fact
-    without retraining.
-    """
+    Series are named "<split>_<term>"; saved as checkpoints/<name>_history.json."""
 
     def __init__(self, name, save_dir=CHECKPOINTS_DIR, meta=None):
         self.name = name
@@ -2615,25 +2175,7 @@ _DEFAULT_CURVE_TERMS = ("data", "phys", "phys_abs", "bc", "total")
 
 def plot_learning_curves(names, save_dir=CHECKPOINTS_DIR, output=None, title=None,
                          terms=_DEFAULT_CURVE_TERMS, logy=True):
-    """Plot the learning curves of one or SEVERAL runs from their JSON history.
-
-    names  : a run name, a list of names (compared on the same axes), or a list of
-             (name, label) pairs.
-    output : path of the figure (default: results/figures/<name>_learning_curves.pdf,
-             or
-             _compare_learning_curves.pdf for several runs); the extension is set
-             by `save_figure`.
-    terms  : terms plotted when present -- one panel per term actually found. The
-             physics loss shows up even for a data-only run if monitoring was on.
-             "phys_abs" (mean(r^2), physical units) replaces the relative "phys"
-             panel when the run recorded it; older runs only have the relative one.
-             That substitution applies to the DEFAULT terms only -- pass both
-             explicitly to get both panels, which is the way to see that they are the
-             same curve up to the (model-dependent) denominator.
-
-    Train as a solid line, val dashed with markers; one colour per run.
-    Usable AFTER THE FACT on any run that has its <name>_history.json.
-    """
+    """Learning curves of one or several runs, from their JSON history."""
     if isinstance(names, str):
         names = [names]
     runs = [(n, n) if isinstance(n, str) else tuple(n) for n in names]

@@ -1,22 +1,4 @@
 #!/usr/bin/env python
-"""Single entry point to train the three operator families of this repository.
-
-    python src/train.py --model pca --name my-run --p_basis 512
-    python src/train.py --model ae  --name my-run --p_basis 128
-    python src/train.py --model tbd --name my-run --n_latent 4 --dim 128
-
-Every model is trained in two stages, run back to back by default (`--stage all`):
-
-  1. `encoder`   fit the input encoder on the (T, kappa) fields of the TRAIN split
-                 only -- PCA basis, convolutional autoencoder, or Transformer-Based DeepONet.
-  2. `operator`  train the (T, kappa) -> I operator on top of it.
-
-This script does not implement anything: it translates its own flags into the
-underlying CLI of `deeponet.py` (PCA / AE) or `deeponet_joint.py` (Transformer-Based
-DeepONet) and calls the very same functions those scripts call. Any option not exposed
-here keeps the default of the underlying parser, so numbers are reproducible either way. The
-defaults below are exactly the ones of the reference campaign (see README).
-"""
 import argparse
 import copy
 import os
@@ -109,8 +91,7 @@ def _operator_argv(args):
 
 
 def run_stage(args, stage):
-    """Parse the underlying CLI with ITS own parser (so every unexposed option keeps
-    its documented default) and call the matching entry point."""
+    """Parse the underlying CLI with its own parser and call the matching entry point."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if args.model == "tbd":
         import deeponet_joint as backend
@@ -130,7 +111,6 @@ def run_stage(args, stage):
     script = "deeponet_joint.py" if args.model == "tbd" else "deeponet.py"
     print(f"\n{'='*78}\n[train.py] stage {stage.upper()} -> {script} "
           f"{' '.join(argv)}\n{'='*78}")
-    # Both run_train_encoder take args only; the encoders pick their own device.
     return entry(sub) if stage == "encoder" else entry(sub, device)
 
 
@@ -262,7 +242,6 @@ def main(argv=None):
     if args.batch_size is None:
         args.batch_size = 64 if args.model == "tbd" else 256
     if args.model == "pca" and not args.freeze_encoder:
-        # A PCA basis has no trainable weights; the underlying CLI rejects the flag.
         args.freeze_encoder = True
 
     print(f"=== RTE2D train | model={args.model} | name={args.name} | "
@@ -271,9 +250,7 @@ def main(argv=None):
     if args.stage in ("all", "encoder"):
         from encoders import encoder_run
         ckpt = encoder_checkpoint(args.model, args.name)
-        # `AE-p128-softplus` and `AE-p128-affine` differ by their output head alone and
-        # share the encoder of the `AE-p128-softplus` configuration, so the encoder stage runs
-        # under THAT name -- it is fitted once, and the second head reuses it.
+        # Both heads of a configuration share its encoder, fitted under the base name.
         base = encoder_run(args.name)
         if os.path.exists(ckpt) and not args.retrain_encoder:
             print(f"[train.py] encoder already present, reused: {ckpt}"

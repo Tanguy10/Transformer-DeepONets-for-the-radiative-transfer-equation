@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# Everything the paper reports, in dependency order. About a week on a single GPU.
-#
-#   setsid nohup bash scripts/run_all.sh > src/logs/run_all.log 2>&1 &
-#
-# Each driver is restartable on its own (.done_<tag> markers plus intra-step --resume),
-# so relaunching this file after a cut picks up where it stopped. Run them one at a
-# time instead if you only need part of the paper -- the list below is the whole of it.
 . "$(dirname -- "${BASH_SOURCE[0]}")/_common.sh"
 
 STEPS=${STEPS:-"paper_models power_spectrum lower_bound multi_resolution physics_loss ablation_junction"}

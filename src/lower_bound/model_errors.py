@@ -18,28 +18,14 @@ def default_ckpt_dir():
 
 
 def affine_head(name):
-    """True for the softplus-free runs, whose reconstructor is LITERALLY the R of
-    Theorem 3.4 (I = (<beta, gamma(y)> + b) * I_scale) where a softplus run is only
-    affine up to that monotone map.
-
-    They are named `<run>-affine` and reuse the encoder of `<run>`, exactly as their
-    training did; the head itself is read back from the checkpoint by
-    `deeponet.load_model`, which needs no help from the name."""
+    """True for the `-affine` runs, whose reconstructor is exactly the R of Theorem 3.4."""
     return name.endswith("-affine")
 
 
 def discover_models(ckpt_dirs):
-    """The models sitting in `ckpt_dirs`, as (name, kind, p, affine, ckpt_dir) tuples.
+    """Models found in `ckpt_dirs`, as (name, kind, p, affine, ckpt_dir) tuples.
 
-    A model is recognised by its checkpoints: `operator_tbd_<name>.pt` is a
-    Transformer-Based DeepONet, `<name>.pth` next to `encoder_<kind>_<name>.<ext>` is a
-    DeepONet with that encoder. The width p is READ from the checkpoint -- p_basis of
-    the branch.trunk junction, n_latent * dim for the attention decoder -- so dropping a
-    new ablation in the directory is all it takes for it to enter the comparison.
-
-    An AFFINE run (`<run>-affine`) carries no encoder of its own: it reuses the one of
-    the softplus run it was derived from, so its family is read off the name instead
-    (cf. `affine_head`)."""
+    The width p is read from each checkpoint."""
     from encoders import _ENCODER_EXT, encoder_run
     from deeponet import infer_architecture
 
@@ -64,12 +50,9 @@ def discover_models(ckpt_dirs):
 
 
 def select_models(models, patterns):
-    """The subset of `models` matched by the shell patterns of --models.
+    """Subset of `models` matched by the --models shell patterns (case-insensitive).
 
-    Matching is case-insensitive and applies to the name with and without its family
-    prefix, so both `--models 'TBD-*'` and `--models 'N4-*'` pick TBD-N4-D128. A pattern
-    that matches nothing is an error: silently plotting fewer models than asked would be
-    worse."""
+    A pattern matching nothing raises."""
     if not patterns:
         return models
     kept, unseen = [], []
@@ -87,32 +70,20 @@ def select_models(models, patterns):
 
 
 def _h5():
-    """The solver H5 if reachable, else mesh_stub: this does not affect the error (it
-    y_coords), sert seulement au constructeur d'Evaluator.
-
-    Goes through `utils.solver_h5`, which does NOT probe an unmounted automount: an
-    `os.path.exists()` on that path while the host is down freezes the process in state D
-    (unkillable, even by SIGKILL)."""
+    """The solver H5 if reachable, else mesh_stub (the errors do not depend on it)."""
     from utils import solver_h5
     return solver_h5()
 
 
 def split_data(splits, which):
-    """The snapshot dict of the requested split ('train' | 'val' | 'test').
-
-    Here `which` is ALWAYS explicit: this package is the one exception to the "report on
-    test" rule -- Thm 3.4 bounds each dataset with ITS OWN spectrum, so
-    E_hat (a non-relative error) is measured on train AND test."""
+    """Snapshot dict of the requested split ('train' | 'val' | 'test')."""
     from utils import split_data as _split_data
     return _split_data(splits, which)
 
 
 @torch.no_grad()
 def squared_errors(model, encoder, splits, device, which, batch_size=256):
-    """||I_m - N(u_m)||^2 per snapshot of the `which` split ('train'|'val'|'test').
-
-    float64, the ABSOLUTE error of Thm 3.4 -- the one the bound speaks about. The
-    relative errors of Table 1 are not this package's business: `utils.eval_one`."""
+    """||I_m - N(u_m)||^2 per snapshot of the `which` split, in float64."""
     from deeponet import INPUT_KEYS
     from utils import Evaluator
     from torch.utils.data import DataLoader, TensorDataset
@@ -157,9 +128,7 @@ def ae_deeponet(splits, device, which, name="AE-deeponet", ckpt_dir=None):
 
 
 def tbd_operator(splits, device, which, name="TBD-finetune", ckpt_dir=None, batch_size=32):
-    """Reduced batch_size: the attention decoder keeps a (B x chunk x dim) activation
-    per block -- at B = 256 the peak exceeds 5 GB and OOMs as soon as a training run is
-    on the GPU. The DeepONets do not have this problem."""
+    """Squared errors of a Transformer-Based DeepONet, at a reduced batch size (memory)."""
     from tbdeeponet import load_operator
     from utils import CHECKPOINTS_DIR
     operator, encoder = load_operator(

@@ -36,16 +36,7 @@ def lower_bound(spec, p):
 
 
 def energy_curve(spec, p_max=None):
-    """Energy curve: the bound sqrt(sum_{k>p} lambda_k) for EVERY p, in one go.
-
-    Returns (p, b) with p = 0..min(M, p_max) and b[p] = lower_bound(spec, p).
-    b[0] = sqrt(tr Gamma_hat) is the total energy (the error of a constant model,
-    I_bar), and b decreases with p.
-
-    The tail is accumulated with a reversed cumsum, so this is a single pass instead of
-    M calls to `tail`. The summation order differs from `lower_bound`'s, with a gap at
-    machine-epsilon level -- the table values stay the ones computed by `lower_bound`.
-    """
+    """The bound sqrt(sum_{k>p} lambda_k) for every p = 0..min(M, p_max), as (p, b)."""
     lam = np.asarray(spec["lam"], dtype=np.float64)
     tails = np.append(np.cumsum(lam[::-1])[::-1], 0.0)
     tails = np.maximum(tails, 0.0)

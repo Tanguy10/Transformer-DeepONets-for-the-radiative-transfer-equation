@@ -1,29 +1,4 @@
 #!/usr/bin/env python
-"""Transformer-Based DeepONet encoder + VANILLA (affine) reconstructor.
-
-Same pipeline as `deeponet_joint.py --mode train_operator`, with ONE change: the
-cross-attention coordinate decoder `dec_I` is replaced by the branch.trunk junction of a
-vanilla DeepONet,
-
-    I(u)(y) = softplus( <z(u), t(y)> + b ) * I_scale,
-
-where z(u) is the FLATTENED latent of the TBD encoder (p = n_latent * dim) and t(y) the
-trunk output. The reconstructor is then AFFINE in z, so Theorem 3.4 (cf.
-`lower_bound/Lower_Bound.md`) CONSTRAINS it -- unlike the attention decoder, which goes
-under the bound.
-
-The pretraining is unchanged: the encoder comes from the ordinary reconstruction run
-(`--mode train_encoder --joint_encoder tbd`), whose decoder IS a cross-attention one.
-Only the prediction stage swaps the junction, and it fine-tunes the encoder as usual.
-
-This file is self-contained: its checkpoints live in `dot_decoder/checkpoints/`, so
-`lower_bound/run.py` (which globs `operator_tbd_*.pt` and rebuilds a CoordDecoder) never
-sees them.
-
-    python run.py --mode train --name abl-dot \
-        --pretrained_encoder TBD-N1-D128 --op_epochs 2000
-    python run.py --mode eval  --name abl-dot
-"""
 import argparse
 import os
 import sys
@@ -61,22 +36,16 @@ def operator_path(name):
 class DotDecoder(nn.Module):
     """Branch.trunk junction: (z_tokens, coords) -> <flatten(z), t(coords)> + b.
 
-    The coordinates go through the SAME random Fourier embedding as the attention
-    decoder it replaces, so what changes between the two models is the junction and
-    nothing else. `coords` is (M, 3) shared across the batch, or (B, M, 3)."""
+    `coords` is (M, 3), shared across the batch, or (B, M, 3)."""
 
     def __init__(self, p, dim=128, hidden=(512, 512, 512, 512), n_fourier=64,
                  fourier_sigma=3.0, coord_dim=3, rff=True, latent_dim=None,
                  branch_hidden=None, affine_head=False):
         super().__init__()
         self.p = p
-        # Marker buffer rather than a plain attribute: it lands in the state_dict, so
-        # `load_dot_operator` recovers the head from the checkpoint alone -- the same
-        # idiom as `trunk_act_last` in deeponet.infer_architecture.
+        # A buffer, so the head is saved in the state_dict and restored on load.
         if affine_head:
             self.register_buffer("affine_head", torch.tensor(1.0))
-        # branch_hidden None = no approximator, z IS the coefficient vector (then p must
-        # be latent_dim). Otherwise A: R^latent_dim -> R^p, the vanilla DeepONet branch.
         if branch_hidden is None:
             if latent_dim is not None and latent_dim != p:
                 raise ValueError(f"without a branch MLP, p must equal the latent size "
@@ -87,9 +56,6 @@ class DotDecoder(nn.Module):
         self.coord_embed = (RandomFourierEmbedding(coord_dim, dim, n_fourier, fourier_sigma)
                             if rff else None)
         if hidden is None:
-            # t(y) = the RFF projection itself, dotted straight with z. Only possible
-            # when p == dim (n_latent = 1); nothing at all sits between the coordinate
-            # embedding and the junction.
             if not rff or p != dim:
                 raise ValueError(f"trunk_hidden=None needs --rff and p == dim "
                                  f"(here p={p}, dim={dim}, i.e. n_latent must be 1)")
@@ -107,11 +73,7 @@ class DotDecoder(nn.Module):
 
 
 class DotOperator(TBDOperator):
-    """`TBDOperator` whose `dec_I` is the affine junction above.
-
-    Everything else is inherited: `predict_I` still applies softplus(.) * I_scale, and
-    `pde_residual` still differentiates dec_I by autodiff -- so `tbdeeponet.fit_operator`,
-    `tbdeeponet.save_operator` and `utils.Evaluator` work unchanged."""
+    """`TBDOperator` whose `dec_I` is the affine junction above."""
 
     def __init__(self, ae, I_scale=1.0, trunk_hidden=(512, 512, 512, 512),
                  n_fourier=64, fourier_sigma=3.0, rff=True, branch_hidden=None,
@@ -126,12 +88,7 @@ class DotOperator(TBDOperator):
                                 affine_head=affine_head)
 
     def predict_I(self, z_tokens, coords):
-        """softplus(dec_I)*I_scale, or dec_I*I_scale with an AFFINE head.
-
-        With `affine` the reconstructor is affine in the coefficient vector, i.e.
-        literally the R of Thm 3.4 -- I may then go negative, which is the price of
-        being inside the class. `pde_residual` differentiates through this method by
-        autodiff, so it follows the head with no separate change."""
+        """softplus(dec_I) * I_scale, or dec_I * I_scale with an affine head."""
         raw = self.dec_I(z_tokens, self._norm_coords(coords))
         if hasattr(self.dec_I, "affine_head"):
             return raw * self.I_scale
@@ -142,10 +99,8 @@ class DotOperator(TBDOperator):
 
 
 def _infer_mlp(sd, prefix):
-    """(hidden widths, in_dim, out_dim) of the `deeponet.MLP` stored under `prefix`.
-
-    None when no weight carries that prefix, which is how `nn.Identity` is recognised --
-    the trunk of the RFF-only variant, the branch when there is no approximator."""
+    """(hidden widths, in_dim, out_dim) of the MLP stored under `prefix`,
+    or None when no weight carries it (nn.Identity)."""
     idx = sorted({int(k.split(".")[2]) for k in sd
                   if k.startswith(f"{prefix}.network.") and k.endswith(".weight")})
     if not idx:
@@ -155,11 +110,7 @@ def _infer_mlp(sd, prefix):
 
 
 def load_dot_operator(path, device="cpu"):
-    """(operator, encoder_wrapper), the trunk geometry READ from the checkpoint.
-
-    `tbdeeponet.save_operator` stores dec_I as a plain state_dict and overwrites `meta` at every
-    best-model save, so the architecture is inferred from the tensor shapes -- the same
-    convention as `deeponet.infer_architecture`."""
+    """(operator, encoder_wrapper); the architecture is inferred from the tensor shapes."""
     state = torch.load(path, map_location=device, weights_only=False)
     arch, gs, sd = state["arch"], state["grid_shape"], state["dec_I"]
     ae = FunctionAutoencoder(grid_shape=gs, in_channels=2, **arch).to(device)
@@ -281,10 +232,7 @@ def sqerr_cached(operator, encoder, splits, which, device, name, refresh=False):
 
 
 def reference_sqerr(name, which):
-    """The cached ||I - N(u)||^2 of a model of `lower_bound/cache`, or None.
-
-    Read-only: this script never writes into that cache. A missing reference is skipped
-    rather than recomputed -- it belongs to `lower_bound/run.py`."""
+    """Cached ||I - N(u)||^2 of a model from `lower_bound/cache`, or None (read-only)."""
     for base in (CACHE, os.path.join(_LB, "cache")):
         npy = os.path.join(base, f"sqerr_{name}_{which}.npy")
         if os.path.exists(npy):
@@ -296,11 +244,7 @@ def reference_sqerr(name, which):
 
 
 def reference_meta(name):
-    """(kind, p, affine) of a model of the main `checkpoints/`, or None.
-
-    Same reading as `model_errors.discover_models`, but for ONE name: that helper opens
-    every checkpoint of the directory to read its width, which costs minutes here for
-    three references."""
+    """(kind, p, affine) of a model of the main checkpoints/, or None."""
     from encoders import _ENCODER_EXT, encoder_run
     from deeponet import infer_architecture
     from utils import CHECKPOINTS_DIR
@@ -402,7 +346,7 @@ def run_eval(args, device):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description=__doc__,
+    p = argparse.ArgumentParser(description="Perceiver encoder + branch.trunk junction.",
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--mode", required=True, choices=["train", "eval"])
     p.add_argument("--name", default="abl-dot")

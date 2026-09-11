@@ -1,19 +1,3 @@
-"""Build the training dataset (.pt) from the raw FVDOM solver output (.h5).
-
-    python src/prepare_data.py --h5 /path/to/smallPoolFire2D.h5 --out data/dataset_train_full_phi.pt
-
-Reads every `time_*` group of the H5 file and writes a single dict of tensors:
-
-  dict_data  supervised pairs -- inputs (T, kappa) per cell, target I on the full
-             22500 cells x 16 ordinates grid, and the shared query coordinates
-             y = (x, y, phi), 3 columns;
-  dict_pde   10000 collocation points drawn uniformly in (x, y, phi), with the RTE
-             source terms read at the nearest cell;
-  dict_bc    1000 boundary points, each on the INCOMING half-circle of its wall.
-
-The file is ~10 GB and is what every training run loads. Expect a few minutes and
-a comparable amount of RAM.
-"""
 import argparse
 import h5py
 import torch
@@ -154,7 +138,7 @@ def main(h5_path=SOLVER_H5, output_pt_path=DEFAULT_DATASET):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p = argparse.ArgumentParser(description="Build the .pt dataset from the raw FVDOM output.")
     p.add_argument("--h5", default=SOLVER_H5,
                    help="Raw FVDOM solver output (or set RTE2D_SOLVER_H5).")
     p.add_argument("--out", default=DEFAULT_DATASET, help="Dataset .pt to write.")

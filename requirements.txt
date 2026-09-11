@@ -1,5 +1,3 @@
-# Versions the reference results were produced with (Python 3.11, CUDA 12.4).
-# Nothing here is pinned tightly; any recent release of these packages works.
 torch>=2.4
 numpy>=1.26
 scipy>=1.11

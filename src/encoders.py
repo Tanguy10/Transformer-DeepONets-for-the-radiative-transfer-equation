@@ -29,8 +29,7 @@ class BaseEncoder:
         raise NotImplementedError
 
     def reconstruct_field(self, key, X):
-        """Rebuild a raw field (N, N_cells): encode then decode.
-        Used to visualise how much information the encoder throws away."""
+        """Rebuild a raw field (N, N_cells): encode, then decode."""
         raise NotImplementedError
 
     def save(self, path):
@@ -41,17 +40,9 @@ class BaseEncoder:
         raise NotImplementedError
 
 class PCAEncoder(BaseEncoder):
-    """
-    PCA dimensionality reduction, applied independently to each input field.
+    """PCA applied independently to each input field.
 
-    n_components : number of axes kept per field (500 in the paper, so that PCA and
-                   the autoencoder hand their branch net vectors of the same size).
-    use_scaler   : True  -> StandardScaler + PCA (every cell normalised to unit
-                            variance, so the PCA diagonalises the CORRELATION);
-                   False -> raw PCA (centred only) = classical POD, which minimises
-                            the reconstruction error in physical units (the
-                            convention of Lu et al. 2026).
-    """
+    use_scaler: StandardScaler + PCA; otherwise raw, centred PCA (POD)."""
 
     kind = "pca"
 
@@ -63,11 +54,7 @@ class PCAEncoder(BaseEncoder):
         self.pcas = {}
 
     def fit_transform_dicts(self, dict_train, input_keys=("u1_in", "u2_in"), dict_val=None):
-        """Fit the PCA on the training data and transform it.
-
-        `dict_val` is ignored (a PCA has no notion of validation); the argument only
-        exists so the signature matches the autoencoder's.
-        """
+        """Fit the PCA on the training data and transform it (`dict_val` is ignored)."""
         dict_transformed = dict_train.copy()
 
         for key in input_keys:
@@ -168,13 +155,7 @@ class ConvAutoencoder(nn.Module):
 
 
 class AutoencoderEncoder(BaseEncoder):
-    """
-    CNN-autoencoder dimensionality reduction, one model trained independently per
-    input field (u1_in, u2_in). What the branch nets receive is the latent vector `z`
-    produced by the encoder half.
-
-    Training happens in fit_transform_dicts (the train_encoder stage).
-    """
+    """One convolutional autoencoder per input field; the branch nets read its latent."""
 
     kind = "autoencoder"
 
@@ -300,10 +281,7 @@ class AutoencoderEncoder(BaseEncoder):
         return torch.cat(outputs, dim=0).float()
 
     def encode_torch(self, key, X):
-        """DIFFERENTIABLE encoding: raw field (N, N_cells) -> latent (N, latent_dim),
-        keeping the graph and staying on X's device (no CPU copy, no no_grad). This is
-        what lets the DeepONet loss reach the AE weights. Assumes X is already on the
-        right device (cf. DeviceTensorLoader)."""
+        """Differentiable encoding (N, N_cells) -> (N, latent_dim), on X's device."""
         model = self.models[key]
         mean_val, std_val = self.stats[key]
         data = (X.float().view(-1, 1, *self.grid_shape) - mean_val.to(X.device)) / std_val.to(X.device)
@@ -329,11 +307,7 @@ class AutoencoderEncoder(BaseEncoder):
             m.eval()
 
     def init_untrained(self, dict_train, input_keys=("u1_in", "u2_in")):
-        """Prepare a RANDOMLY INITIALISED AE (no pretraining) for joint from-scratch
-        training with the DeepONet. Instantiates one model per field and computes the
-        standardisation stats (mean/std) from the data -- WITHOUT a single
-        reconstruction epoch. The weights are then learned only through the DeepONet
-        loss (encode_torch inside the graph). Use together with fine-tuning."""
+        """Untrained AEs and standardisation stats, for from-scratch joint training."""
         for key in input_keys:
             data = dict_train[key].float().view(-1, 1, *self.grid_shape)
             self.stats[key] = (data.mean().detach().cpu(), data.std().detach().cpu())
@@ -435,14 +409,9 @@ HEAD_SUFFIXES = ("-softplus", "-affine")
 
 
 def encoder_run(name):
-    """The CONFIGURATION whose encoder `name` uses.
+    """The configuration whose encoder `name` reads: the name without its head suffix.
 
-    `AE-p128-softplus` and `AE-p128-affine` differ by their output head alone, so both
-    read `encoder_autoencoder_AE-p128.pt`: the pretrained encoder belongs to the
-    (family, rank) configuration, not to a head, and is neither refitted nor stored
-    twice. The head-specific weights of a FINE-TUNED encoder are a different matter --
-    they are saved as `<run>_ft`, under the full run name, so the two heads keep their
-    own (cf. `utils.load_any_encoder`)."""
+    Fine-tuned weights are saved under the full run name, as `<run>_ft`."""
     for suffix in HEAD_SUFFIXES:
         if name.endswith(suffix):
             return name[:-len(suffix)]

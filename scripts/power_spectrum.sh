@@ -1,18 +1,4 @@
 #!/usr/bin/env bash
-# Figure 6: power spectral density of the incident radiation G over the test split, for
-# the solver and for the best model of each family.
-#
-#   truth   FVDOM
-#   pca     PCA-p512-softplus   500 PCA components per field
-#   ae      AE-p512-softplus    latent 500 -> the same branch input as the PCA
-#   tbd     TBD-N4-D128    best of the (N, D) grid, as PCA and AE are of theirs
-#
-# PCA and AE at the same p and the same branch width: what separates their two panels is
-# the encoder, nothing else.
-#
-#   setsid nohup bash scripts/power_spectrum.sh > src/logs/psd.log 2>&1 &
-#
-# Cost: ~10 min, dominated by the 901 Transformer-Based DeepONet inferences.
 . "$(dirname -- "${BASH_SOURCE[0]}")/_common.sh"
 
 SPLIT=${SPLIT:-test}

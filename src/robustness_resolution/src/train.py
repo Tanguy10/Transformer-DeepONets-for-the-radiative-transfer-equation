@@ -26,7 +26,6 @@ def train_tbd(args, device):
     finetune = args.finetune_encoder
     print(f"[Transformer-Based DeepONet] encodeur patch={encoder.patch} "
           f"(latent {encoder.latent_dim}), {'FINE-TUNED' if finetune else 'frozen'}")
-    # Fine-tuning encodes inside the graph, so there is nothing to precompute.
     latents = None if finetune else U.compute_tbd_latents(encoder, groups, device)
     I_scale = U.median_I_scale(groups, is_train)
     operator = U.build_tbd_operator(encoder, I_scale, art["xy_lo"], art["xy_hi"], device,
@@ -52,17 +51,7 @@ def train_tbd(args, device):
 
 
 def train_modular(args, device):
-    """STANDARD PCA/AE DeepONet (full grid) at a FIXED working resolution.
-
-    * `--input_res 150`: the 150-interpolated dataset (coarse snapshots are upsampled).
-    * `--input_res 50`: the dataset brought down to 50^2 (150^2/75^2 DEGRADED, 25^2
-      interpolated) -- the "fixed dimension = lowest common denominator" scenario: the
-      high-resolution information is LOST, unlike the Transformer-Based DeepONet which
-      ingests it natively.
-
-    In both cases the encoder is fitted on THAT dataset, at THAT resolution, on the
-    train split only -- never on the clean 150^2 fields of the main campaign.
-    """
+    """PCA/AE DeepONet at a fixed working resolution (`--input_res` 150 or 50)."""
     from deeponet import (MultiBranchDeepONet, Trainer, FullGridDataset, INPUT_KEYS)
     from utils import QUERY_DIM
     R = args.input_res
@@ -83,8 +72,7 @@ def train_modular(args, device):
     print(f"[{args.model}@{R}^2] encoder {'FINE-TUNED' if finetune else 'frozen'}, "
           f"latents {encoder.latent_dims}")
     if finetune:
-        # Raw fields kept: the AE runs INSIDE the graph, exactly as
-        # `deeponet.run_train_deeponet` does under --finetune_encoder.
+        # Raw fields: the AE must run inside the graph to be fine-tuned.
         train_ds = FullGridDataset(data_tr["u1_in"], data_tr["u2_in"], data_tr["I_target"], y_full)
         val_ds = FullGridDataset(data_va["u1_in"], data_va["u2_in"], data_va["I_target"], y_full)
     else:

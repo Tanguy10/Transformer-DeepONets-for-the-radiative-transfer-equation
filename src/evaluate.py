@@ -1,44 +1,4 @@
 #!/usr/bin/env python
-"""Single entry point to evaluate a trained model and write its figures.
-
-    python src/evaluate.py --name my-run
-    python src/evaluate.py --name my-run --split test,train --recon --physics
-    python src/evaluate.py --encoders pca:my-pca,ae:my-ae        # encoders alone
-
-The model family is detected from the checkpoints on disk, and the network
-architecture is read back from the checkpoint itself -- nothing has to be repeated
-from the training command line.
-
-What it covers:
-
-  1. the errors on the intensity I and on the incident radiation G, per snapshot,
-     RELATIVE (L2/L1) and ABSOLUTE (E_hat, RMSE per point, MAE), on any of the
-     splits -- `--split test,train` measures both in one run;
-  2. the G maps of a few snapshots: truth, model, signed relative error in %;
-  3. `--recon`: what the PRETRAINED encoder alone can rebuild -- the same relative L2,
-     on T and kappa, over the whole split, plus a few reconstruction figures;
-  4. `--encoders`: the ENCODERS ALONE, without any DeepONet -- the same relative L2 of
-     T and kappa over the split for each of them, plus one comparison figure per
-     snapshot (two rows, T and kappa; truth then every encoder side by side);
-  5. `--physics`: the RTE residual of the prediction (rho = RMS(r)/RMS(S), RMS(r)/max I,
-     transport correlation), the same quantity the physics loss optimises.
-
-Everything lands in `results/<name>/`:
-
-  * `G_simple_dataset_snap<i>.pdf` -- G of the solver, G of the model, and the signed
-    relative error in % (diverging scale, symmetric around 0);
-  * `recon_*_snap<i>.pdf` -- with `--recon`: T and kappa, original / rebuilt / error;
-  * `recon_compare_<split>_snap<i>.pdf` -- with `--encoders`: T and kappa (two rows),
-    solver / reconstruction of each encoder / |Delta| over ||truth||_inf in %;
-  * `<name>_metrics_<split>.txt` and `.json` -- the numbers of the whole split, and
-    `<name>_recon_<split>.*` for the `--encoders` mode.
-
-Figures are written as PDF (vector: sharp at any zoom, ready for the paper). To get
-a PNG instead:  RTE2D_FIG_FORMAT=png RTE2D_FIG_DPI=1200 python src/evaluate.py ...
-
-Errors are reported on the TEST split by default: the val split was used to pick
-the best checkpoint, so reporting it would publish the selection criterion.
-"""
 import argparse
 import json
 import os
@@ -78,8 +38,7 @@ def detect_model(name):
 
 
 def load_pair(name, model, device):
-    """(network, encoder) of a run, whatever its family -- for the residual, which
-    needs the model itself and not only its metrics."""
+    """(network, encoder) of a run, whatever its family."""
     if model == "tbd":
         from deeponet_joint import operator_path
         from tbdeeponet import load_operator
@@ -102,14 +61,7 @@ def _eval_argv(args, model, split, snapshots):
 
 def run_physics(name, model, splits, split, device, n_cells, n_dirs, seed,
                 n_snapshots=None, chunk=None):
-    """RTE residual of the prediction on `split`, as `--w_phys` would measure it.
-
-    `chunk` = snapshots differentiated at once. The residual needs a graph over
-    chunk*n_cells*n_dirs points, and the cross-attention decoder of the
-    Transformer-Based DeepONet keeps one activation per point and per block: 64
-    snapshots x 64000 points run out of memory, hence the smaller default
-    for that family (the DeepONets, whose trunk is an MLP, take the wide chunk).
-    """
+    """RTE residual of the prediction on `split`; `chunk` = snapshots per pass."""
     from utils import build_collocation, evaluate, report, split_data
     import math
 
@@ -129,8 +81,7 @@ def run_physics(name, model, splits, split, device, n_cells, n_dirs, seed,
 def run_recon(name, model, splits, split, snapshots, output_dir, device, prefer_ft):
     """Reconstruction quality of the encoder alone: metric over the split + figures."""
     from utils import reconstruction_report
-    # For the Transformer-Based DeepONet the fine-tuned encoder has no `_ft` file: its
-    # weights are the `ae` of the operator checkpoint.
+    # The fine-tuned TBD encoder lives in the operator checkpoint, not in an _ft file.
     encoder = load_pair(name, model, device)[1] if (prefer_ft and model == "tbd") else None
     stats = reconstruction_report(
         ENCODER_KIND[model], name, split=split, aggregate=True, snapshots=snapshots,
@@ -172,8 +123,7 @@ def parse_encoder_spec(spec):
 
 
 def run_encoders(args, splits, split, snapshots, device):
-    """Encoder-only evaluation: reconstruction error of each --encoders entry over the
-    split, plus one comparison figure per snapshot. No DeepONet involved."""
+    """Reconstruction error of each --encoders entry over the split, plus figures."""
     from utils import (encoder_split_error, load_any_encoder, plot_encoder_comparison,
                        resolve_snapshots, split_data)
 
@@ -401,8 +351,7 @@ def main(argv=None):
     splits = None
     records = []
     for k, split in enumerate(splits_wanted):
-        # Figures for the first split only: their names carry no split, so plotting
-        # another split would overwrite them with different snapshots.
+        # First split only: figure names carry no split, a second would overwrite them.
         snapshots = args.snapshots if k == 0 else "none"
         snapshots = "" if snapshots.lower() == "none" else snapshots
 

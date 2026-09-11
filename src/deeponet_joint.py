@@ -1,15 +1,4 @@
 #!/usr/bin/env python
-"""RTE 2D DeepONet with a single branch net fed by a joint autoencoder.
-
-One conv autoencoder encodes both input fields (T, kappa) stacked as 2 channels
-into a shared latent z, standardised per channel. Contract used by Trainer and
-Evaluator: transform_dicts returns the SAME z under both the u1_in and u2_in
-keys, and the single-branch model reads only the first.
-
-I = softplus(branch(z) . trunk(y) + b) * I_scale. Trainer, collocation,
-ReLoBRaLo and Evaluator are reused unchanged from deeponet / utils.
-CLI examples at the bottom of this file.
-"""
 import argparse
 import os
 
@@ -29,11 +18,9 @@ from utils import (Evaluator, load_and_split_dataset, plot_eval_snapshots, trans
 
 
 class JointConvAutoencoder(nn.Module):
-    """Same CNN AE as ConvAutoencoder but with 2 channels in AND out.
+    """2-channel convolutional autoencoder.
 
-    (N, 2, 150, 150) --enc--> z (N, latent_dim) --dec--> (N, 2, 150, 150).
-    15x15 bottleneck (150 /2 /5), like the single-channel autoencoders of the project.
-    """
+    (N, 2, 150, 150) -> z (N, latent_dim) -> (N, 2, 150, 150)."""
 
     def __init__(self, latent_dim=512, base=32, in_channels=2):
         super().__init__()
@@ -74,11 +61,9 @@ class JointConvAutoencoder(nn.Module):
 
 
 class JointAutoencoderEncoder:
-    """JOINT encoder: a single AE mapping (T, kappa) to one shared latent z.
+    """Joint encoder: one AE maps (T, kappa) to a shared latent z.
 
-    Compatible with Trainer/Evaluator: transform_dicts returns z under BOTH the
-    u1_in and u2_in keys (SingleBranchDeepONet only reads branch_inputs[0]).
-    """
+    `transform_dicts` returns z under BOTH u1_in and u2_in; the model reads [0]."""
 
     kind = "joint_autoencoder"
 
@@ -236,13 +221,7 @@ class JointAutoencoderEncoder:
 
 
 def joint_encoder_path(name, tag="ae", save_dir=CHECKPOINTS_DIR):
-    """Path of the joint encoder: checkpoints/encoder_<tag>_<name>.pt for the
-    Transformer-Based DeepONet, checkpoints/encoder_joint_ae_<name>.pt for the
-    convolutional one.
-
-    As for the fixed-rank encoders, the head suffix is stripped: `TBD-N1-D128-affine`
-    reuses the encoder of `TBD-N1-D128` instead of refitting one (cf.
-    `encoders.encoder_run`)."""
+    """Joint encoder path, checkpoints/encoder_<tag>_<name>.pt, head suffix stripped."""
     from encoders import encoder_run
     stem = f"encoder_{tag}" if tag == "tbd" else f"encoder_joint_{tag}"
     return os.path.join(save_dir, f"{stem}_{encoder_run(name)}.pt")
@@ -253,17 +232,14 @@ def _joint_encoder_tag(args):
 
 
 def operator_path(name, save_dir=CHECKPOINTS_DIR):
-    """Path of the (T,kappa)->I operator with Transformer-Based DeepONet decoder:
-    checkpoints/operator_tbd_<name>.pt."""
+    """Path of the operator: checkpoints/operator_tbd_<name>.pt."""
     return os.path.join(save_dir, f"operator_tbd_{name}.pt")
 
 
 class SingleBranchDeepONet(nn.Module):
-    """Single-branch 2D RTE DeepONet: I = softplus(branch(z).trunk(y) + b)*I_scale.
+    """Single-branch DeepONet: I = softplus(branch(z) . trunk(y) + b) * I_scale.
 
-    branch_inputs is a list so the signature stays compatible with Trainer/Evaluator
-    (which pass [u1, u2]); only branch_inputs[0] = the joint latent z is used.
-    """
+    Only branch_inputs[0], the joint latent, is used."""
 
     def __init__(self, branch_input_dim, trunk_input_dim, p_basis,
                  branch_hidden=[512, 512, 512, 512], trunk_hidden=[512, 512, 512, 512],
@@ -455,10 +431,7 @@ def run_train_deeponet(args, device):
 
 
 def _resolve_snapshot_indices(spec, data_val):
-    """Parse `--eval_snapshots`: non-negative integers = direct index into data_val;
-    -1 = the MOST INTENSE snapshot; "chaotic[:k]" = the k snapshots with the largest
-    spatial variance of G. Delegated to `utils.resolve_snapshots` so the CLI and the
-    plotting helpers share EXACTLY the same convention."""
+    """Parse --eval_snapshots, cf. `utils.resolve_snapshots`."""
     from utils import resolve_snapshots
     return resolve_snapshots(spec, data_val)
 
@@ -499,8 +472,7 @@ def run_eval_2d(args, device):
 
 
 def _fresh_encoder_for_operator(args, data_train, device):
-    """RANDOM (from-scratch) Transformer-Based DeepONet encoder: input stats computed on
-    the train split, the AE itself untrained (it will be trained jointly with dec_I)."""
+    """Untrained Transformer-Based DeepONet encoder, input stats from the train split."""
     from tbdeeponet import TBDEncoder
     enc = TBDEncoder(
         patch=args.tbd_patch, dim=args.tbd_dim, n_latent=args.tbd_n_latent,
@@ -517,9 +489,8 @@ def _fresh_encoder_for_operator(args, data_train, device):
 
 
 def _resolve_operator_encoder(args, data_train, device):
-    """Return (encoder, is_pretrained). `--pretrained_encoder` accepts: a .pt PATH, an
-    encoder NAME (checkpoints/encoder_tbd_<name>.pt), 'auto' (= the operator's
-    name), or 'scratch'/'none' (random from-scratch encoder)."""
+    """(encoder, is_pretrained). --pretrained_encoder: a .pt path, an encoder name,
+    'auto' (the operator's name) or 'scratch' / 'none'."""
     from tbdeeponet import TBDEncoder
     src = args.pretrained_encoder
     if src in ("scratch", "none", "off"):

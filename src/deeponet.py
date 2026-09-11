@@ -46,11 +46,7 @@ class MLP(nn.Module):
 class MultiBranchDeepONet(nn.Module):
     """Multi-input DeepONet: I = act(<beta, gamma(y)> + b) * I_scale.
 
-    `affine=True` drops the output softplus, so the reconstructor is exactly the
-    R(beta) = gamma_0 + sum_l beta_l gamma_l of Theorem 3.4 and the lower bound of
-    `lower_bound/` governs it to the letter. The price is that I may go negative.
-    The choice is recorded in the state dict, so `load_model` restores it by itself.
-    """
+    act is softplus, or the identity with `affine=True` (the affine class of Thm 3.4)."""
 
     def __init__(self, branch_input_dims, trunk_input_dim, p_basis,
                  branch_hidden=[512, 512, 512, 512], trunk_hidden=[512, 512, 512, 512],
@@ -90,25 +86,11 @@ class MultiBranchDeepONet(nn.Module):
         return out * self.I_scale
 
     def pde_residual(self, branch_inputs, y, u1_eval, u2_eval):
-        """2D RTE residual, vectorised and correct per snapshot (one source each).
+        """RTE residual per snapshot, the trunk Jacobian computed once and shared.
 
-        branch_inputs : list of latents [(B, d1), (B, d2), ...] (encoder outputs).
-        y             : collocation points (P, 3) = (x, y, phi), shared.
-        u1_eval       : source term at the y points, (B, P)     [= kappa*Ib].
-        u2_eval       : absorption term at the y points, (B, P) [= -kappa].
-
-        Returns (residual, I), both (B, P):
-            residual = (sin phi dI/dx + cos phi dI/dy) - (u1_eval + u2_eval * I)
-
-        Exploits I = act(c.t + b)*I_scale, which is linear in the trunk basis:
-        the trunk Jacobian (d t / d y) is computed ONCE (torch.func) and shared across
-        every snapshot. Fully differentiable w.r.t. the parameters.
-
-        The Jacobian is taken w.r.t. `y`, the trunk's direct input, whose first two
-        columns are x and y: J[:, :, 0] and J[:, :, 1] are dt/dx and dt/dy
-        (J[:, :, 2] = dt/dphi, unused here). The transport coefficients come from the
-        third column through `transport_coeffs`.
-        """
+        branch_inputs: latents [(B, d1), (B, d2)]; y: (P, 3) = (x, y, phi);
+        u1_eval = kappa*Ib, u2_eval = -kappa, both (B, P).
+        Returns (residual, I), both (B, P)."""
         c = self.branches[0](branch_inputs[0])
         for branch, b_in in zip(self.branches[1:], branch_inputs[1:]):
             c = c * branch(b_in)
@@ -197,14 +179,9 @@ class FullGridDataset(torch.utils.data.Dataset):
 
 
 class DeviceTensorLoader:
-    """Mini-loader for tensors moved to the device ONCE and sliced by index.
+    """Mini-loader over tensors moved to the device once and sliced by index.
 
-    Replaces the CPU DataLoader on the data split: its pipeline (per-snapshot collate
-    + pin_memory + a ~740 MB H2D transfer of I_target per batch) measured ~8 s/epoch,
-    against ~0.4 s for direct GPU slicing -- the GPU spent its time waiting, with a
-    sawtooth 0->80->0 % utilisation. Only usable when the split fits in VRAM (about
-    9 GB here).
-    """
+    The whole split must fit in GPU memory."""
 
     def __init__(self, tensors, batch_size, shuffle, device):
         self.tensors = [t.to(device) for t in tensors]
@@ -225,15 +202,7 @@ class DeviceTensorLoader:
 
 
 class CollocationSampler:
-    """Draw PDE collocation points on the fly.
-
-    Each call draws M points (x, y, phi) uniformly in the domain and finds the nearest
-    mesh cell (KDTree) so the source terms can be read at runtime from the raw T and
-    kappa fields. phi follows the repository's single angular convention (cf.
-    `dirs_from_phi`): drawing phi continuously over [0, 2pi) is precisely what
-    constrains the angles ABSENT from the 16 ordinates of the data.
-    Nothing is stored: the spatial and angular coverage is renewed every epoch.
-    """
+    """Draw M points (x, y, phi) per call, sources read at the nearest mesh cell."""
 
     def __init__(self, cell_xy):
         xy = cell_xy.detach().cpu().numpy()
@@ -251,26 +220,7 @@ class CollocationSampler:
 
 
 class ReLoBRaLo:
-    """Relative Loss Balancing with Random Lookback (Bischof & Kraus, 2021).
-
-    Adaptively balances several loss terms according to their relative convergence
-    speed. At each step the weights lambda_i form a softmax (temperature tau) of the
-    progress ratios L_i(t)/L_i(t'), normalised to sum to m (= number of terms):
-
-        bal_i(t; t') = m * softmax_i( L_i(t) / (tau * L_i(t')) )
-
-    A term that stalls (large L_i(t)/L_i(t') ratio) gets over-weighted. The update
-    combines an EMA (alpha) of the history with a "random lookback": with probability
-    (1-rho) the reference of the previous step t-1 is replaced by the initial
-    reference t=0, so as not to stay trapped on a recent plateau:
-
-        lambda_i(t) = alpha*(rho*lambda_i(t-1) + (1-rho)*bal_i(t;0))
-                      + (1-alpha)*bal_i(t;t-1)
-
-    rho ~ Bernoulli(rho_mean) is drawn at each step (rho_mean close to 1 -> rare
-    lookbacks). The loss values are detached: the weights are constants as far as
-    backpropagation is concerned (they receive no gradient).
-    """
+    """Relative Loss Balancing with Random Lookback (Bischof & Kraus, 2021)."""
 
     def __init__(self, names, alpha=0.999, temperature=0.1, rho_mean=0.999,
                  device="cpu"):
@@ -316,36 +266,18 @@ class Trainer:
         self.finetune_encoder = False
 
     def _encode_branch(self, u1_in, u2_in):
-        """Input latents of the branch nets.
-
-        Fine-tuning (finetune_encoder=True): the RAW fields (u1=T, u2=kappa) go
-        through the AE INSIDE the graph (trainable weights, encode_torch).
-        Otherwise they already are precomputed latents (frozen encoder) and are
-        returned untouched -- zero cost."""
+        """Branch-net latents: the raw fields go through the AE inside the graph when
+        fine-tuning; otherwise the inputs already are latents."""
         if self.finetune_encoder:
             return (self.encoder.encode_torch("u1_in", u1_in),
                     self.encoder.encode_torch("u2_in", u2_in))
         return u1_in, u2_in
 
     def _pde_loss(self, pde_batch, y_pde, cell_idx, n_colloc, return_parts=False):
-        """RELATIVE physics loss of a PDE batch (residual shared via model.pde_residual).
+        """Relative physics loss of a PDE batch, normalised as in `utils.rel_phys_loss`.
 
-        Normalised by the (detached) magnitude of the PDE terms,
-        max(RMS_transport^2, RMS_rhs^2), rather than by I_scale^2:
-          - it yields an O(1) number (= (relative residual)^2), comparable with the
-            data/BC losses and cleanly tunable through w_phys;
-          - I_scale^2 would not do, because r has the units of a kappa*I (or I/L), not
-            of an I: the loss sat around 1e2-1e3 whatever the quality of the model.
-        The denominator is .detach()ed so it acts as a plain scale factor (the
-        optimiser cannot cheat by inflating the transport term).
-
-        return_parts=True also returns mean(r^2) (physical units, normalised by the
-        number of points only) and the denominator -- cf. `utils.rel_phys_loss`.
-
-        n_colloc=0: stored pool (pde_batch = enc_u1, enc_u2, u1_eval, u2_eval).
-        n_colloc>0: resampled points (pde_batch = enc_u1, enc_u2, T_raw, kappa_raw);
-                    the source is rebuilt at the nearest neighbour of each point.
-        """
+        n_colloc=0: pde_batch = (enc_u1, enc_u2, u1_eval, u2_eval), the stored pool;
+        n_colloc>0: pde_batch = (enc_u1, enc_u2, T_raw, kappa_raw), resampled points."""
         if n_colloc > 0:
             b1, b2, T_raw, kappa_raw = [t.to(self.device) for t in pde_batch]
             T_at, kap_at = T_raw[:, cell_idx], kappa_raw[:, cell_idx]
@@ -439,10 +371,8 @@ class Trainer:
             raise ValueError(f"unknown data_loss: {data_loss!r} (mse | rel_l2)")
 
         def data_loss_fn(pred, target):
-            """rel_l2: PER-SNAPSHOT relative L2 over the full field (the loss of Lu et
-            al., which is also the reported metric); mse: pooled MSE / I_scale^2.
-            The best-model selection criterion follows `data_loss`, since in data-only
-            mode the total validation loss reduces to w_data * loss_data."""
+            """rel_l2: per-snapshot relative L2, the reported metric;
+            mse: pooled MSE / I_scale^2."""
             if data_loss == "rel_l2":
                 return ((pred - target).norm(dim=1)
                         / target.norm(dim=1).clamp_min(1e-8)).mean()
@@ -714,8 +644,7 @@ class Trainer:
 
 
 def build_encoder_from_args(args):
-    """Instantiate an (unfitted) encoder from the CLI hyperparameters.
-    (make_encoder drops the kwargs that do not apply to the requested kind.)"""
+    """Instantiate an unfitted encoder from the CLI hyperparameters."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     return make_encoder(
         args.encoder,
@@ -730,9 +659,6 @@ def build_encoder_from_args(args):
 
 
 def run_train_encoder(args):
-    # A head-suffixed run shares the encoder of its configuration (encoders.encoder_run),
-    # so `encoder_path` resolves to that shared file and a refit here would silently
-    # overwrite it -- with different weights, for an autoencoder.
     if args.name != encoder_run(args.name):
         raise SystemExit(
             f"{args.name!r} names an output head, not an encoder: both heads of "

@@ -1,4 +1,3 @@
-
 import argparse
 import importlib.util
 import os
@@ -59,14 +58,9 @@ def load_models(specs, device):
 
 @torch.no_grad()
 def predict(model, enc, arch, res, T, k, y150, device, src_res=GRID, chunk=40000):
-    """(T, kappa) supplied at resolution `src_res` -> I predicted at the 360 000 coords
-    of the 150^2 grid.
+    """I at the 150^2 coords from (T, kappa) supplied at `src_res`.
 
-    The Transformer-Based DeepONet ingests the input AS IS (natively, whatever
-    `src_res`). A PCA/AE with working resolution `res` must first bring the input there
-    (area mean if src_res > res,
-    bilinear interpolation otherwise) -- its dimension is fixed. The output is always
-    evaluated at the 150^2 coords (trunk / dec_I are coordinate-based)."""
+    PCA/AE first resize the input to their working resolution `res`."""
     if arch == "tbd":
         bi = [U.tbd_encode_native(enc, T, k, src_res, device).to(device), None]
     else:
@@ -78,13 +72,8 @@ def predict(model, enc, arch, res, T, k, y150, device, src_res=GRID, chunk=40000
 
 @torch.no_grad()
 def evaluate_mixed(models, art, clean_I, y150, device, batch=16, limit=0, which="test"):
-    """MULTI-RESOLUTION INPUT TEST: each snapshot of the `which` split is supplied at its
-    degraded resolution (150^2 / 75^2 / 25^2), the target staying the TRUE 150^2 solver I.
-
-    This is the realistic inference scenario: an imperfect observation of (T, kappa)
-    comes in and the fine field is wanted. The Transformer-Based DeepONet ingests it
-    natively; PCA/AE must interpolate it to their working resolution. Returns the errors
-    per input resolution, plus the global one."""
+    """Errors with each input supplied at its degraded resolution (target: 150^2 I),
+    per input resolution and overall."""
     groups = art["groups"]
     keep = U.split_mask(art["meta"]["N"], which, art["meta"]["split_seed"])
     nc = GRID * GRID
@@ -126,14 +115,7 @@ def evaluate_mixed(models, art, clean_I, y150, device, batch=16, limit=0, which=
 
 @torch.no_grad()
 def evaluate_res_sweep(models, T_val, k_val, I_val, y150, device, res_list, batch=16):
-    """UNSEEN-RESOLUTION TEST: the SAME clean split is degraded from 150^2 to each R of
-    `res_list`, and every model is fed each version, the target staying the true 150^2 I.
-
-    Unlike `evaluate_mixed` -- whose columns are disjoint thirds of the split, one per
-    training resolution -- every column here is measured on ALL the snapshots, so the row
-    reads as a resolution response curve of a single model on a single set of scenes.
-    An R outside the training set (150/75/25) is an EXTRAPOLATION: the Transformer-Based
-    DeepONet only needs `patch` to divide R, PCA/AE resize to their working resolution."""
+    """Errors with the whole split degraded to each resolution of `res_list`."""
     nc = GRID * GRID
     out = {k: {"per_res": {}, "_I": [], "_G": []} for k in models}
     counts = {}
@@ -186,26 +168,8 @@ def format_table_mixed(res, res_list, counts, title=None):
     return "\n".join(lines)
 
 
-
-
-
 def _pick_snapshots(dd, res_list, k_per_res, snaps, which="test"):
-    """Snapshots to draw -> (global indices, [(R, global index)]).
-
-    THE SAME snapshots are drawn at EVERY resolution: a column of figures is then read
-    as a loss of input resolution on one physical scene, never as a change of scene.
-    The inputs of a given snapshot at 75^2 and 25^2 are rebuilt from its 150^2 fields by
-    the area mean of `build_mixed` (`resize_fields` is exact for the factors 2 and 6), so
-    what a model is fed here is what the mixed dataset holds for that resolution.
-
-    Default: the `k_per_res` most STRUCTURED snapshots of the `which` split, picked by
-    the repository's own `utils.resolve_snapshots` -- the same selection the main
-    `results/` figures use, so a robustness figure and a `results/` one can be laid side
-    by side. `snaps` = explicit global indices.
-
-    `resolve_snapshots` indexes WITHIN the split; the figures index the whole database
-    (a snapshot carries a native resolution there), hence the composition with
-    `split_indices`."""
+    """Snapshots drawn at every resolution -> (global indices, [(R, global index)])."""
     if snaps:
         gidx = [int(s) for s in snaps]
     else:
@@ -219,12 +183,7 @@ def _pick_snapshots(dd, res_list, k_per_res, snaps, which="test"):
 
 @torch.no_grad()
 def fields_figure(dd, idx, res_list=(25, 75, 150), tag=""):
-    """The INPUT of the models for ONE snapshot: T on the first row, kappa on the second,
-    avg-pooled to each resolution of the campaign.
-
-    One colourbar per row (the two fields share no unit) but ONE scale per row across the
-    columns, so a column is read as a loss of detail and never as a change of level -- the
-    25^2 column is exactly what a model working at that resolution is given."""
+    """Input fields of one snapshot, T and kappa, at each resolution of the campaign."""
     fig, axes = plt.subplots(2, len(res_list), figsize=(3.0 * len(res_list), 6.4),
                              squeeze=False)
     kw = dict(origin="lower", interpolation="nearest", cmap="magma")
@@ -252,22 +211,8 @@ def fields_figure(dd, idx, res_list=(25, 75, 150), tag=""):
 @torch.no_grad()
 def snapshot_maps(models, dd, y150, device, res_list, k_per_res=1, snaps=None, tag="",
                   which="test"):
-    """One figure per (snapshot, input resolution), (T, kappa) given at that resolution.
-
-    Results only: one column per model, its prediction `G` on top and the error map
-    |dG|/||G||_inf below. No annotation -- the two colourbars and the model name above
-    its column.
-
-    NOTHING is scaled on the figure it is drawn on, exactly as in `utils.g_simple_figure`
-    (the main `results/`): an error of 20 % must carry the same colour here, there, and
-    from one resolution to the next.
-
-      * the error runs on a FIXED 0..ERR_VMAX_DEFAULT % (RTE2D_ERR_VMAX overrides) with
-        the main palette, and a pointed colourbar flags a model running past it;
-      * `G` runs on ONE scale for the whole figure set -- the peak of the brightest
-        reference drawn -- so one G level = one colour across every snapshot, model and
-        resolution.
-    """
+    """One figure per (snapshot, input resolution): each model's predicted G
+    and |dG|/||G||_inf, on fixed scales."""
     nc = GRID * GRID
     keys = list(models)
     paths = []
@@ -350,8 +295,6 @@ def format_table(res, n_val):
     for k in sorted(res, key=lambda f: res[f]["I_l2"]):
         lines.append(f"{res[k]['label']:26s} | {res[k]['I_l2']*100:8.2f}% | {res[k]['G_l2']*100:8.2f}%")
     return "\n".join(lines)
-
-
 
 
 def main():

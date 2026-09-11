@@ -1,9 +1,3 @@
-"""2D power spectral density: FFT, square, average in rings of constant |k|.
-
-Method and its deviations from the reference post: see README.md.
-Entry point: SpectrumBinner. Correctness: selftest().
-"""
-
 from __future__ import annotations
 
 import numpy as np
@@ -44,15 +38,9 @@ def top_ring(npix, kmax):
 
 
 class SpectrumBinner:
-    """Ring-averaged power spectrum, precomputed for one image size.
+    """Ring-averaged power spectrum for one image size.
 
-    The ring mask depends only on npix, so it is built once and each batch then
-    costs one FFT plus a segmented sum.
-
-    kmax selects how far the rings go: 'complete' stops at the last fully
-    sampled ring, 'corner' keeps every mode of the sampled square, including
-    the angularly incomplete rings of its corners.
-    """
+    kmax: 'complete' stops at the last fully sampled ring, 'corner' keeps every mode."""
 
     def __init__(self, npix, subtract_mean=True, normalize=True, shell="count",
                  kmax="complete"):
@@ -69,8 +57,7 @@ class SpectrumBinner:
         self.kvals = 0.5 * (self.kbins[1:] + self.kbins[:-1])
         self.nbins = self.kvals.size
         self.shell_area = np.pi * (self.kbins[1:] ** 2 - self.kbins[:-1] ** 2)
-        # fftfreq spans -npix/2 .. npix/2-1, so the radius-npix/2 ring is missing
-        # its positive side: last fully sampled ring is npix/2 - 1.
+        # fftfreq spans -npix/2..npix/2-1: the last fully sampled ring is npix/2 - 1.
         self.k_complete = self.npix // 2 - 1
 
         # -1 / nbins mean "outside": the k=0 mode, and any ring past kmax.
@@ -124,15 +111,7 @@ class SpectrumBinner:
 
 
 def selftest(npix=150, seed=0, verbose=True):
-    """Five numerical checks; raises AssertionError on the first failure.
-
-    1. with every deviation switched off, reproduces the post bit for bit;
-    2. Parseval: sum_k P(k) equals the spatial variance;
-    3. a pure cos(2*pi*n*x/L) lands in ring n with amplitude A^2/2;
-    4. a pure CORNER mode, |k| far past Nyquist, lands in its ring just as
-       exactly -- those modes are sampled, not aliased;
-    5. kmax='corner' keeps every mode, so Parseval holds for any field.
-    """
+    """Numerical self-checks of the binner; raises AssertionError on the first failure."""
     rng = np.random.default_rng(seed)
     ok = lambda name, val: verbose and print(f"  [ok] {name:.<52s} {val}")
 
@@ -146,8 +125,6 @@ def selftest(npix=150, seed=0, verbose=True):
     assert rel < 1e-10, f"spectrum != post (max relative error {rel:.2e})"
     ok("identical to the reference implementation (max relative gap)", f"{rel:.2e}")
 
-    # Built in Fourier space: periodic by construction and band-limited, so
-    # nothing is lost to the corners the method discards.
     spec = np.zeros((npix, npix), dtype=complex)
     kf = np.fft.fftfreq(npix) * npix
     kx, ky = np.meshgrid(kf, kf)

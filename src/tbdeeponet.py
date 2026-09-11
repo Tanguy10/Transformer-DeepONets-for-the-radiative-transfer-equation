@@ -1,19 +1,3 @@
-"""FunDiff Function Autoencoder, joint 2-channel (Wang et al. 2025).
-
-Encoder: ViT patchify with interpolated PE -> Perceiver bottleneck -> self-attn,
-giving a fixed n_latent x dim latent for both fields (T, kappa) stacked as
-2 channels. Decoder is per-coordinate: random Fourier features cross-attend the
-latents, so the autoencoder can be evaluated anywhere.
-
-Resolution invariance comes from _interp_pe, latent_queries and
-valid_subsample_factors. The joint latent feeds SingleBranchDeepONet
-(deeponet_joint.py --joint_encoder tbd) under the same both-keys contract.
-
-The dec_I decoder queries (x, y, phi) -- a single angular coordinate, see
-`utils.dirs_from_phi` for the convention -- and the data loss defaults to rel_l2.
-See TBDOperator._norm_coords and fit_operator(data_loss=).
-"""
-
 import contextlib
 import math
 import os
@@ -27,15 +11,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 
 def valid_subsample_factors(grid_shape, patch, requested=None, min_tokens=2):
-    """Subsampling factors s COMPATIBLE with the grid and the patch size.
-
-    The paper subsamples the input by a random factor while still reconstructing the
-    HIGH resolution. At fixed patch size the coarse resolution H/s must stay divisible
-    by the patch (otherwise the ViT cannot patchify). The paper's {1,2,4,8} assumes
-    power-of-two grids; for 150 = 15*10 with patch=10 only s in {1,3,5} works
-    (150/2 = 75 is not divisible by 10). So we keep the s such that H%s==0, W%s==0,
-    (H/s)%patch==0, (W/s)%patch==0, and at least `min_tokens` tokens per side.
-    `requested`=None => auto (every valid factor)."""
+    """Subsampling factors s compatible with the grid: H/s and W/s integers divisible
+    by `patch`, at least `min_tokens` tokens per side. `requested=None`: all of them."""
     H, W = grid_shape
     cand = requested if requested is not None else range(1, min(H, W) // patch + 1)
     out = []
@@ -67,9 +44,7 @@ def parse_subsample_arg(value):
 
 
 class TransformerBlock(nn.Module):
-    """Pre-norm self-attention block: x -> x + MSA(LN(x)); x -> x + MLP(LN(x)).
-    MLP = Linear -> GELU -> Linear of width `mlp_ratio * dim`. Used for the
-    self-attention over the latents."""
+    """Pre-norm self-attention block: x + MSA(LN(x)), then x + MLP(LN(x))."""
 
     def __init__(self, dim, heads, mlp_ratio=2.0, dropout=0.0):
         super().__init__()
@@ -87,9 +62,7 @@ class TransformerBlock(nn.Module):
 
 
 class CrossAttentionBlock(nn.Module):
-    """Pre-norm cross-attention block (Perceiver AND coordinate decoder):
-        q -> q + MHA(LN(q), LN(kv), LN(kv));  q -> q + MLP(LN(q)).
-    The queries `q` and the context `kv` may have different lengths."""
+    """Pre-norm cross-attention: q + MHA(LN(q), LN(kv), LN(kv)), then q + MLP(LN(q))."""
 
     def __init__(self, dim, heads, mlp_ratio=2.0, dropout=0.0):
         super().__init__()
@@ -108,9 +81,7 @@ class CrossAttentionBlock(nn.Module):
 
 
 class RandomFourierEmbedding(nn.Module):
-    """Coordinate embedding by random Fourier features (Tancik et al. 2020):
-        coords (..., in_dim) -> [sin(2pi B c), cos(2pi B c)] -> Linear -> (..., dim).
-    B is a FIXED Gaussian matrix (buffer) of scale `sigma` -- the key RFF knob."""
+    """Random Fourier features [sin(2pi Bc), cos(2pi Bc)] -> Linear, B fixed of scale sigma."""
 
     def __init__(self, in_dim, dim, n_freq=64, sigma=3.0):
         super().__init__()
@@ -124,18 +95,10 @@ class RandomFourierEmbedding(nn.Module):
 
 
 class FunctionAutoencoder(nn.Module):
-    """Transformer-Based DeepONet (FunDiff): (N, C, H, W) -> joint latent z_L -> values
-    f_hat at any point.
+    """Patch/Perceiver encoder and coordinate decoder: (N, C, H, W) -> latents -> values.
 
-    `in_channels` = C stacked fields (2 = (T, kappa)). The PE are interpolated on the
-    fly, so H, W are arbitrary (multiples of the patch), including subsampled ones.
-
-    encode(x)          -> FLATTENED latent (N, n_latent*dim)  [branch-net input]
-    encode_tokens(x)   -> latents (N, n_latent, dim)          [decoder context]
-    decode(z, coords)  -> (N, M, in_channels)  (in_channels==1 => (N, M))
-    forward(x, coords) -> (pred, z_flat)
-
-    """
+    encode(x) -> (N, n_latent*dim); encode_tokens(x) -> (N, n_latent, dim);
+    decode(z, coords) -> (N, M, C), or (N, M) when C == 1."""
 
     def __init__(self, grid_shape=(150, 150), patch=10, dim=128, n_latent=4,
                  depth=4, dec_depth=4, heads=8, mlp_ratio=2.0,
@@ -171,8 +134,7 @@ class FunctionAutoencoder(nn.Module):
         nn.init.trunc_normal_(self.latent_queries, std=0.02)
 
     def _interp_pe(self, h, w):
-        """Interp(PE, L): the PE learned on the reference grid (gh, gw), interpolated
-        (bicubic) onto the actual token grid (h, w). Identity when (h, w)==(gh, gw)."""
+        """Positional embeddings of the reference grid, bicubic-interpolated to (h, w)."""
         if h == self.gh and w == self.gw:
             return self.pe_enc
         pe = self.pe_enc.reshape(1, self.gh, self.gw, self.dim).permute(0, 3, 1, 2)
@@ -180,7 +142,7 @@ class FunctionAutoencoder(nn.Module):
         return pe.permute(0, 2, 3, 1).reshape(1, h * w, self.dim)
 
     def encode_tokens(self, x):
-        """𝓔 : champ (N, C, H, W) -> latent z_L (N, n_latent, dim), taille FIXE."""
+        """(N, C, H, W) -> latents (N, n_latent, dim), fixed size."""
         p = self.patch_embed(x)
         h, w = p.shape[-2], p.shape[-1]
         f_pe = p.flatten(2).transpose(1, 2)
@@ -193,12 +155,12 @@ class FunctionAutoencoder(nn.Module):
         return z
 
     def encode(self, x):
-        """Flattened encoder: (N, C, H, W) -> joint latent (N, n_latent*dim) for the branch net."""
+        """(N, C, H, W) -> flattened latent (N, n_latent*dim)."""
         return self.encode_tokens(x).flatten(1)
 
     def decode(self, z_tokens, coords):
-        """𝓓 : latents (N, n_latent, dim) + coords ((M,2) ou (N,M,2)) -> f̂.
-        (N, M, in_channels) ; (N, M) si in_channels == 1."""
+        """Latents (N, n_latent, dim) and coords (M, 2) or (N, M, 2)
+        -> (N, M, C), or (N, M) when C == 1."""
         if coords.dim() == 2:
             coords = coords.unsqueeze(0).expand(z_tokens.shape[0], -1, -1)
         x = self.coord_embed(coords)
@@ -214,14 +176,9 @@ class FunctionAutoencoder(nn.Module):
 
 
 class TBDEncoder:
-    """JOINT 2-channel Transformer-Based DeepONet encoder (FunDiff) -- same interface as
-    `deeponet_joint.JointAutoencoderEncoder`: `transform_dicts` returns the joint
-    latent z under BOTH keys (u1_in, u2_in); SingleBranchDeepONet only reads [0].
+    """Joint 2-channel Transformer-Based DeepONet encoder, standardised per channel.
 
-    Standardisation is PER CHANNEL (T and kappa live on very different scales). The
-    objective is continuous: MSE over M sampled coordinates, 2 channels.
-    latent_dim = n_latent*dim.
-    """
+    `transform_dicts` returns the flattened latent under BOTH u1_in and u2_in."""
 
     kind = "tbd"
 
@@ -257,8 +214,7 @@ class TBDEncoder:
 
     @staticmethod
     def _grid_coords(grid_shape):
-        """Cell coordinates normalised into [0,1]^2, in the flattening order of the
-        fields (cell c = i*W + j)."""
+        """Cell coordinates in [0, 1]^2, in the flattening order of the fields."""
         H, W = grid_shape
         ii, jj = torch.meshgrid(torch.arange(H), torch.arange(W), indexing="ij")
         x = jj.reshape(-1).float() / (W - 1)
@@ -282,9 +238,7 @@ class TBDEncoder:
 
     def fit_transform_dicts(self, dict_train, input_keys=("u1_in", "u2_in"), dict_val=None,
                             resume_name=None, resume_every=10):
-        """`resume_name` enables restart after an interruption (state in
-        checkpoints/<resume_name>_enc_resume.pt, written every `resume_every` epochs and
-        removed on normal completion). Cf. utils.save_atomic."""
+        """Train on the fields; `resume_name` enables restarting after an interruption."""
         coords = self.coords.to(self.device)
         n_cells = coords.shape[0]
         factors = valid_subsample_factors(self.grid_shape, self.patch, self.subsample_factors)
@@ -405,8 +359,7 @@ class TBDEncoder:
         return torch.cat(outs, dim=0).float()
 
     def reconstruct_fields(self, u1, u2):
-        """Rebuild (T_hat, kappa_hat) at physical scale, (N, N_cells) each: decode the
-        WHOLE grid in coordinate chunks, then de-standardise per channel."""
+        """(T_hat, kappa_hat) at physical scale, (N, N_cells) each."""
         self.model.eval()
         coords = self.coords.to(self.device)
         data = self._standardize(self._stack(u1, u2))
@@ -501,12 +454,7 @@ class TBDOperator(nn.Module):
         self.xy_hi.copy_(xy.max(dim=0).values.to(self.xy_hi.device))
 
     def _norm_coords(self, coords):
-        """(x, y, phi) -> all three in [0, 1], the input of the random Fourier features.
-
-        phi already arrives as the single angular variable (convention
-        `utils.dirs_from_phi`: angle from +y clockwise, that of the FVDOM ordinates); it
-        is only divided by 2pi so it stays commensurate with x, y in [0, 1] -- otherwise
-        the RFF (sigma=3) would see about 6 times more angular than spatial variation."""
+        """(x, y, phi) -> [0, 1]^3, the input of the random Fourier features."""
         span = (self.xy_hi - self.xy_lo).clamp_min(1e-8)
         xy = (coords[..., :2] - self.xy_lo) / span
         phi = coords[..., 2:3] / (2 * math.pi)
@@ -516,17 +464,14 @@ class TBDOperator(nn.Module):
         return self.ae.encode_tokens(x)
 
     def predict_I(self, z_tokens, coords):
-        """(z_tokens, coords (x, y, phi)) -> I_hat = softplus(D_I) * I_scale, (N, M).
+        """(z_tokens, coords (x, y, phi)) -> softplus(D_I) * I_scale, (N, M).
 
-        `affine` drops that softplus. The decoder stays a cross-attention, so the
-        reconstructor is still nonlinear in z: this only removes the output map that
-        makes even the branch.trunk models fall outside the class of Theorem 3.4."""
+        `affine` drops the softplus."""
         raw = self.dec_I(z_tokens, self._norm_coords(coords))
         return (raw if self.affine else F.softplus(raw)) * self.I_scale
 
     def reconstruct(self, z_tokens, coords2d):
-        """The Transformer-Based DeepONet reconstruction decoder (2 channels) -- for the
-        auxiliary loss."""
+        """Reconstruction of the input pair (2 channels), for the auxiliary loss."""
         return self.ae.decode(z_tokens, coords2d)
 
     def forward(self, branch_inputs, coords):
@@ -535,25 +480,11 @@ class TBDOperator(nn.Module):
         return self.predict_I(z_tokens, coords)
 
     def pde_residual(self, branch_inputs, y, u1_eval, u2_eval, create_graph=True):
-        """RTE residual mu.grad(I) + kappa(I-I_b) = 0 by STANDARD autodiff through dec_I.
+        """RTE residual by autodiff through dec_I (double backward).
 
-        Unlike `MultiBranchDeepONet.pde_residual` (separable branch.trunk, with the
-        jacfwd/vmap shortcut on the trunk alone), I is not linear in (z, coords) here
-        (cross-attention decoder): dI/dx and dI/dy come from a standard double backward
-        (torch.autograd.grad with create_graph=True), which costs about one extra
-        forward+backward through dec_I.
-
-        branch_inputs[0]: FLATTENED latent (B, n_latent*dim), same convention as
-        `forward` (branch_inputs[1] is ignored, kept so the signature stays generic, cf.
-        utils.evaluate/model_fd_residual). y: (P, 3) = (x, y, phi), SHARED across the
-        batch. u1_eval, u2_eval: (B, P). Returns (residual, I), both (B, P).
-
-        `create_graph=False` is the MONITORING mode (the residual is measured, not
-        optimised). The graph of dI/dx is then not kept, so there is no double backward
-        and the fused sdpa backend is enough. Measured 4x cheaper in time and 2x in memory
-        than the trainable mode (batch 64, P=2048) -- which is why monitoring is nearly
-        free on a data-only run.
-        """
+        branch_inputs[0]: flattened latent (B, n_latent*dim); y: (P, 3), shared;
+        u1_eval, u2_eval: (B, P). Returns (residual, I), both (B, P).
+        `create_graph=False` measures the residual without optimising it."""
         from utils import transport_coeffs
 
         z_flat = branch_inputs[0]
@@ -561,8 +492,7 @@ class TBDOperator(nn.Module):
         z_tokens = z_flat.view(B, self.n_latent, self.dim)
         backend = sdpa_kernel(SDPBackend.MATH) if create_graph else contextlib.nullcontext()
         with torch.enable_grad(), backend:
-            # clone(): a broadcast leaf would make autograd sum dI/dx over the
-            # batch instead of keeping it per sample.
+            # clone(): a broadcast leaf would make autograd sum dI/dx over the batch.
             xy = y[:, :2].unsqueeze(0).expand(B, -1, -1).clone().requires_grad_(True)
             phi = y[:, 2:3].unsqueeze(0).expand(B, -1, -1)
             I = self.predict_I(z_tokens, torch.cat([xy, phi], dim=-1))
@@ -575,8 +505,7 @@ class TBDOperator(nn.Module):
         return residual, I
 
     def init_dec_I_from_recon(self):
-        """Warm start: copy the cross-attention blocks and dec_norm of the recon decoder
-        into dec_I (coord_embed and head stay fresh: different coord/output sizes)."""
+        """Warm start: copy the cross-attention blocks of the recon decoder into dec_I."""
         self.dec_I.dec_blocks.load_state_dict(self.ae.dec_blocks.state_dict())
         self.dec_I.dec_norm.load_state_dict(self.ae.dec_norm.state_dict())
         print("[operator] dec_I warm-started from the reconstruction decoder.")
@@ -600,36 +529,10 @@ def fit_operator(operator, encoder, dict_train, dict_val, y_full, I_train, I_val
                  loss_balancing="static", relobralo_alpha=0.99, relobralo_temp=0.1,
                  relobralo_rho=0.999, monitor_phys=True, history_name=None, resume=True,
                  data_loss="rel_l2"):
-    """Train the (T,kappa)->I operator by coordinate subsampling (the Transformer-Based
-    DeepONet paradigm).
+    """Train the (T, kappa) -> I operator on `n_query` random points per step.
 
-    * `encoder` (TBDEncoder) provides the PER-CHANNEL standardisation of the input
-      fields (the same stats as the pretrained encoder) and the 2D coords (aux recon).
-    * Full-grid is impossible (360k coords x batch => a giant cross-attention): we draw
-      `n_query` random RTE points per step, shared across the batch (as the
-      Transformer-Based DeepONet does).
-    * FROZEN encoder (default): latents precomputed once, so training only touches
-      dec_I (fast). Otherwise the encoding happens inside the graph (fine-tuning).
-    * `w_recon` > 0 (unfrozen encoder only): adds w_recon * MSE(recon (T,kappa)).
-    * `monitor_phys` (default True) MEASURES the physics loss (train AND val) at the
-      `val_every` cadence EVEN in data-only mode (w_phys=0), without optimising it --
-      this is what lets the RTE residual of a purely data-driven model be tracked. The
-      measured cost is negligible (~0.01 % of the epoch time, cf.
-      `pde_residual(create_graph=False)`). The full history goes to
-      `checkpoints/<history_name>_history.json` (plotted by `utils.plot_learning_curves`).
-    * `w_phys` > 0: RTE physics loss (relative residual via `TBDOperator.pde_residual`,
-      the same normalisation as `Trainer._pde_loss`), with collocation points drawn from
-      the SAME `y_full` pool (grid x the 16 trained directions) as the data loss --
-      `n_query_phys` per step (default = `n_query`). `loss_balancing="relobralo"` weights
-      data/phys adaptively (updated once per epoch, cf. deeponet.ReLoBRaLo); in "static"
-      mode the w_data/w_phys weights are fixed. `w_bc` is not wired (it raises if > 0):
-      the domain boundary condition is not established with certainty yet, keep w_bc=0.
-    * Validation EVERY `val_every` epochs (full-angle validation over ~2*n_query coords
-      is expensive -- doing it every epoch dominated the runtime). TF32 enabled.
-    * `data_loss`: "rel_l2" (the DEFAULT -- per-snapshot relative L2 over the `n_query`
-      coords of the step, averaged over the batch: the loss of Lu et al., which is also
-      the reported metric) or "mse" (pooled MSE / I_scale^2). The best-model selection
-      criterion follows `data_loss`."""
+    The encoder is frozen (latents precomputed) or fine-tuned inside the graph;
+    `w_phys` > 0 adds the relative RTE residual; `data_loss` is rel_l2 or mse."""
     if w_bc > 0:
         raise NotImplementedError(
             "w_bc > 0 is not wired for train_operator: the domain boundary condition "
@@ -911,10 +814,7 @@ def fit_operator(operator, encoder, dict_train, dict_val, y_full, I_train, I_val
 
 
 def save_operator(operator, encoder, path, meta=None, verbose=True):
-    """Save the operator: ae (encoder+recon), dec_I, input stats, I_scale, coordinate
-    normalisation, and the architecture needed to rebuild encoder+operator at eval time.
-    `verbose=False` writes silently (used for the incremental best-model save during
-    training)."""
+    """Save weights, input stats, I_scale and architecture of the operator."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     mean, std = encoder.stats
     arch = {"patch": encoder.patch, "dim": encoder.dim, "n_latent": encoder.n_latent,
@@ -936,8 +836,7 @@ def save_operator(operator, encoder, path, meta=None, verbose=True):
 
 
 def load_operator(path, device="cpu"):
-    """Recharge (operator, encoder_wrapper). `encoder_wrapper` (TBDEncoder) sert
-    d'`evaluator.encoder` (transform_dicts -> latents aplatis) ; `operator` d'`evaluator.model`."""
+    """Load (operator, encoder_wrapper), the Evaluator's model and encoder."""
     state = torch.load(path, map_location=device)
     arch = state["arch"]
     gs = state["grid_shape"]

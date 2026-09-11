@@ -1,13 +1,3 @@
-"""The two figures, both built from the same panel: one source per column.
-
-Each panel carries the individual snapshots of that source (thin), their mean
-over the whole block (thick), and the truth mean of the SAME quantity (dashed
-black), so a model is read against its reference without leaving its panel.
-Axes are shared, otherwise each panel would be auto-stretched and they would all
-look alike by construction; the same snapshots are drawn in every panel and in
-every figure.
-"""
-
 from __future__ import annotations
 
 import zlib
@@ -21,12 +11,7 @@ import matplotlib.pyplot as plt
 import fields as F
 from utils import FIG_DPI, save_figure
 
-# Hue = model family, so a multi-resolution model wears its clean twin's colour
-# and the eye can follow the same curve from one figure to the next. The truth
-# is not a model among others: it carries the ink of the text.
 COLOR = {"truth": "#0b0b0b", "pca": "#2a78d6", "ae": "#eb6834", "tbd": "#1baf7a"}
-# Hues kept for the runs named on the command line, which have no family of their
-# own; the choice is a hash of the name, so a run keeps its colour across figures.
 EXTRA = ("#8e5bd0", "#d63b6a", "#c79a12", "#3aa8c1")
 INK, INK2, GRIDC = "#0b0b0b", "#52514e", "#d8d7d2"
 UNIT_G, UNIT_I = "W²·m⁻⁴", "W²·m⁻⁴·sr⁻²"

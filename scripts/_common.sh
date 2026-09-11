@@ -1,14 +1,3 @@
-# Shared preamble of the reproduction drivers. Sourced, never run on its own.
-#
-# Gives every script the same four things:
-#   * ROOT / SRC / CKPT / LOGD          paths derived from this file, so a driver may be
-#                                       launched from anywhere;
-#   * PY                                the interpreter, overridable with PY=...;
-#   * run <model> <tag> <cmd...>        one step, logged, skipped if already done
-#                                       (a .done_<tag> marker) -- so relaunching the
-#                                       same driver after a cut resumes where it stopped;
-#   * wait_for_gpu                      training is compute-bound: two concurrent runs
-#                                       each go twice as slow, for no net gain.
 set -u
 SCRIPTS=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(dirname "$SCRIPTS")
@@ -39,9 +28,7 @@ run(){   # run <model> <tag> <command...>
   return $rc
 }
 
-# Ignore processes stuck in UNINTERRUPTIBLE disk sleep (state D): one frozen on an
-# automounted path keeps its GPU memory reserved without ever resuming, and counting it
-# as a tenant would block the driver forever. It burns no SM.
+# Ignore processes in D state: stuck on an automount, they hold GPU memory forever.
 gpu_busy(){
   local p st out=""
   for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do

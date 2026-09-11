@@ -1,16 +1,4 @@
 #!/usr/bin/env python
-"""PSD of the FVDOM truth against the DeepONet / Transformer-Based DeepONet models.
-
-Two families of figures, both with one source per panel:
-
-    psd_G.pdf           G = ∫ I dφ, the angular integral -- one figure
-    psd_I_phi<deg>.pdf  I in ONE direction -- one figure per direction
-
-What they mean and how to read them: see README.md.
-Run from the repo root: python src/power_spectrum/run.py [--split test]
-Any trained run can be added as a panel: --sources truth tbd my-run
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -36,7 +24,6 @@ from utils import DEFAULT_DATASET
 CACHE_DIR = os.path.join(_HERE, "cache")
 RESULTS_DIR = os.path.join(_HERE, "results")
 
-# Band the terminal summary integrates over: structures of 4 cells and less.
 TAIL_LO = 40.0
 
 
@@ -46,13 +33,9 @@ def _cache_path(split, key, n):
 
 def compute_source(key, dict_split, geom, y_full, binner, n, device, batch=64,
                    pts_per_fwd=F.PTS_PER_FWD, verbose=False):
-    """(P_G, P_I, err_G, err_I) for one source: the PSD of G per snapshot
-    (n, nbins), the PSD of I per snapshot AND per direction (n, n_dirs, nbins),
-    and the relative L2 of each. One inference pass feeds both spectra.
+    """(P_G, P_I, err_G, err_I) of one source, per snapshot (and per direction for I).
 
-    Nothing is aggregated here, so any statistic can be recomputed from the
-    cache without re-running inference. The errors are None for the truth.
-    """
+    The errors are None for the truth."""
     model, encoder = F.load_source(key, device)
     is_truth = model is None
 
@@ -123,7 +106,7 @@ def tail_ratio(P, P_truth, k, band):
 
 def main():
     ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+        description="Power spectral density of the FVDOM truth and of trained models.")
     ap.add_argument("--dataset", default=DEFAULT_DATASET)
     ap.add_argument("--split", default="test", choices=("train", "val", "test"))
     ap.add_argument("--sources", nargs="+", default=["truth", *F.MODEL_KEYS],
@@ -162,8 +145,6 @@ def main():
 
     known = set(F.SOURCES)
     args.sources = [F.resolve_source(s) for s in args.sources]
-    # A run named on the command line tags its own figures, so a user run never
-    # overwrites the reference ones.
     extra = [k for k in args.sources if k not in known]
     if extra and not args.tag:
         args.tag = extra[0]
@@ -224,8 +205,7 @@ def main():
             eg = d["err_G"] if "err_G" in d.files else None
             ei = d["err_I"] if "err_I" in d.files else None
         P_G[key] = np.asarray(pg, dtype=np.float64)[:, keep]
-        # Sorted by phi here: the dataset stores the ordinates in an arbitrary
-        # order, and unsorted panels hide the rotation.
+        # Sort by phi: the dataset stores the ordinates in arbitrary order.
         P_I[key] = np.asarray(pi, dtype=np.float64)[:, order][..., keep]
         err_G[key], err_I[key] = eg, ei
 
@@ -255,8 +235,6 @@ def main():
         print(f"  {names[0]} … {names[-1]}  ({len(names)} figures, "
               "one per direction, shared scales)")
 
-    # Control only: the L2 must land on the repo's known figures, otherwise the
-    # wrong checkpoint was loaded and the spectra are meaningless.
     print()
     for key in keys:
         if err_G[key] is None:
