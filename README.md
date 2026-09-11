@@ -25,7 +25,7 @@ radiative intensity:
 The reference data are FVDOM solutions of a 2D pool fire (FireFOAM `smallPoolFire2D`):
 6001 snapshots on a 150 × 150 mesh and 16 ordinates φ_m = 2πm/16. The networks are queried
 pointwise at ξ = (x, y, φ); the incident radiation G = ∫ I dΩ ≈ (4π/16) Σ_m I(·, φ_m) is
-evaluated alongside I. [`EQUATION.md`](EQUATION.md) gives the formulation exactly as implemented.
+evaluated alongside I.
 
 Three models learn this operator:
 
