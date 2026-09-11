@@ -27,6 +27,10 @@ The reference data are FVDOM solutions of a 2D pool fire (FireFOAM `smallPoolFir
 pointwise at ξ = (x, y, φ); the incident radiation G = ∫ I dΩ ≈ (4π/16) Σ_m I(·, φ_m) is
 evaluated alongside I.
 
+The dataset was provided by Xiaoyi Lu (FM Global) and is the one used in X. Lu, M. Daneker,
+L. Lu and Y. Wang, *Machine learning accelerated radiative transfer modeling in CFD fire
+simulations*, Fire Safety Journal 163, 104819 (2026). It is not included in this repository.
+
 Three models learn this operator:
 
 - **PCA-DeepONet** / **AE-DeepONet** (`pca`, `ae`) — a PCA or a convolutional autoencoder per
@@ -63,7 +67,6 @@ src/
 ├── robustness_resolution/   training and evaluation on mixed 150² / 75² / 25² inputs
 └── dot_decoder/             Perceiver encoder + branch·trunk junction
 data/mesh_stub.h5            solver mesh, used when the raw H5 file is not available
-EQUATION.md                  the RTE exactly as implemented
 ```
 
 Checkpoints, logs and results are written to `src/checkpoints/`, `src/logs/` and
