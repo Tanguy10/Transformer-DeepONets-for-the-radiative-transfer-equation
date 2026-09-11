@@ -1,4 +1,4 @@
-# RTE2D — Transformer DeepONets for the radiative transfer equation
+# Transformer DeepONets for the radiative transfer equation
 
 Code accompanying the paper *Beyond Affine Reconstruction: Multi-Resolution Transformer
 DeepONets for the Radiative Transfer Equation*.
