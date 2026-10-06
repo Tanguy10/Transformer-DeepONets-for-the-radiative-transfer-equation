@@ -18,7 +18,8 @@ UNIT_G, UNIT_I = "W²·m⁻⁴", "W²·m⁻⁴·sr⁻²"
 
 plt.rcParams.update({
     "figure.dpi": 130, "savefig.dpi": FIG_DPI, "savefig.bbox": "tight",
-    "font.size": 9, "axes.titlesize": 10, "axes.labelsize": 9,
+    "font.size": 13, "axes.titlesize": 16, "axes.labelsize": 15,
+    "xtick.labelsize": 13, "ytick.labelsize": 13,
     "axes.edgecolor": INK2, "axes.labelcolor": INK, "text.color": INK,
     "xtick.color": INK2, "ytick.color": INK2,
     "axes.grid": True, "grid.color": GRIDC, "grid.linewidth": 0.6,
@@ -66,16 +67,15 @@ def _panels(curves, keys, k, xscale, ylims, unit, idx, out, suptitle=None):
         ax.plot(k, curves[key].mean(axis=0), color=color(key), lw=2.4, zorder=4,
                 label=f"mean of {n_tot} snapshots")
         ax.set(xscale=xscale, yscale="log", ylim=ylims,
-               xlabel="indice de mode  k", title=F.SOURCES[key]["label"])
+               xlabel="mode index  k", title=F.SOURCES[key]["label"])
     axes[0].set_ylabel(f"P(k)   [{unit}]")
     axes[-1].plot([], [], color=color(keys[-1]), lw=1.0, alpha=0.35,
                   label=f"{len(idx)} snapshots drawn at random")
-    axes[-1].legend(loc="lower left", fontsize=8)
+    fig.legend(*axes[-1].get_legend_handles_labels(), loc="lower center", ncol=3,
+               fontsize=13)
     if suptitle:
         fig.suptitle(suptitle, fontsize=11, color=INK)
-        fig.tight_layout(rect=(0, 0, 1, 0.95))
-    else:
-        fig.tight_layout()
+    fig.tight_layout(rect=(0, 0.08, 1, 0.95 if suptitle else 1))
     out = save_figure(out, fig)
     plt.close(fig)
     return out
